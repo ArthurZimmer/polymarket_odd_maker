@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+*.egg
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+.turbo/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+# Local
+.DS_Store
+.env
+.env.local
+.env.*.local
+*.log
+logs/
+
+# Local data — never commit secrets or local DBs
+*.sqlite
+*.sqlite-journal
+*.db
+config.encrypted
+salt.bin
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code local config
+.claude/
+
+# Backend backup/scratch files
+*.py.new
+*.py.bak

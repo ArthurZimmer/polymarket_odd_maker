@@ -1,0 +1,57 @@
+[project]
+name = "poly-scraper"
+version = "0.1.0"
+description = "Polymarket odd maker bot — sports arbitrage via market delay"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "websockets>=13.0",
+    "sqlalchemy>=2.0.30",
+    "alembic>=1.13",
+    "aiosqlite>=0.20",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "py-clob-client>=0.20",
+    "curl-cffi>=0.7",
+    "cryptography>=43",
+    "rapidfuzz>=3.10",
+    "cachetools>=5.5",
+    "web3>=7.5",
+    "eth-account>=0.13",
+    "python-jose[cryptography]>=3.3",
+    "passlib[bcrypt]>=1.7",
+    "python-multipart>=0.0.20",
+    "httpx>=0.28",
+    "structlog>=24.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-vcr>=1.0",
+    "vcrpy>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["backend*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "A", "C4", "RUF"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
