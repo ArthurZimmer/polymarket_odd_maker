@@ -3,7 +3,14 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { apiFetch, ApiError, setToken, WatcherStatus, ScraperStatus } from "@/lib/api";
+import {
+  apiFetch,
+  ApiError,
+  setToken,
+  WatcherStatus,
+  ScraperStatus,
+  MatcherStatus,
+} from "@/lib/api";
 
 const links: Array<{ href: string; label: string }> = [
   { href: "/config/wallet", label: "Wallet" },
@@ -15,18 +22,21 @@ export function Nav({ subtitle }: { subtitle?: string }) {
   const pathname = usePathname();
   const [status, setStatus] = useState<WatcherStatus | null>(null);
   const [scrapers, setScrapers] = useState<ScraperStatus[] | null>(null);
+  const [matcher, setMatcher] = useState<MatcherStatus | null>(null);
 
   useEffect(() => {
     let alive = true;
     async function poll() {
       try {
-        const [w, s] = await Promise.all([
+        const [w, s, m] = await Promise.all([
           apiFetch<WatcherStatus>("/api/watcher/status"),
           apiFetch<ScraperStatus[]>("/api/scrapers/status"),
+          apiFetch<MatcherStatus>("/api/matcher/status"),
         ]);
         if (!alive) return;
         setStatus(w);
         setScrapers(s);
+        setMatcher(m);
       } catch (e) {
         if (e instanceof ApiError && e.status === 401) {
           // logged out — let other pages handle the redirect
@@ -85,6 +95,7 @@ export function Nav({ subtitle }: { subtitle?: string }) {
       <div className="flex items-center gap-3">
         <WatcherPill status={status} />
         <ScrapersPill scrapers={scrapers} />
+        <MatcherPill matcher={matcher} />
         <button
           onClick={onLogout}
           className="rounded-md border border-zinc-300 px-3 py-1 text-sm text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
@@ -178,6 +189,55 @@ function ScrapersPill({ scrapers }: { scrapers: ScraperStatus[] | null }) {
       <span className="text-zinc-500">
         · {totalSnapshots.toLocaleString("pt-BR")} snaps
       </span>
+    </span>
+  );
+}
+
+function MatcherPill({ matcher }: { matcher: MatcherStatus | null }) {
+  if (!matcher) {
+    return (
+      <span className="rounded-full bg-zinc-100 px-3 py-1 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+        Matcher …
+      </span>
+    );
+  }
+  if (matcher.total_runs === 0) {
+    return (
+      <span className="rounded-full bg-zinc-100 px-3 py-1 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+        Matcher iniciando…
+      </span>
+    );
+  }
+  const cov = matcher.coverage_pct;
+  const dot = cov >= 80 ? "bg-emerald-500" : cov >= 50 ? "bg-amber-500" : "bg-red-500";
+  const sportLines = Object.entries(matcher.coverage_by_sport)
+    .filter(([, c]) => c.matchable > 0 || c.parseable > 0)
+    .sort((a, b) => b[1].parseable - a[1].parseable)
+    .map(([sport, c]) => {
+      const pct = c.matchable > 0 ? (100 * c.matched) / c.matchable : 0;
+      return `  ${sport}: ${c.matched}/${c.matchable} matchable (${pct.toFixed(0)}%) · ${c.parseable} parseable`;
+    })
+    .join("\n");
+  const lastRun = matcher.last_run_at
+    ? new Date(matcher.last_run_at).toLocaleTimeString("pt-BR")
+    : "—";
+  const title =
+    `Matcher · ${matcher.last_matches_total.toLocaleString("pt-BR")} matches totais · ` +
+    `${matcher.last_pm_events_matchable} matchable / ` +
+    `${matcher.last_pm_events_parseable} parseable / ` +
+    `${matcher.last_pm_events_scanned} scaneados\n` +
+    `Última corrida: ${lastRun} (${(matcher.last_run_duration_ms ?? 0).toFixed(0)}ms)\n\n` +
+    `Cobertura por esporte (matched/matchable):\n${sportLines}`;
+  return (
+    <span
+      className="flex items-center gap-2 rounded-full bg-zinc-100 px-3 py-1 text-xs text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300"
+      title={title}
+    >
+      <span className={`inline-block h-2 w-2 rounded-full ${dot}`} />
+      <span>
+        Match {matcher.last_matches_total.toLocaleString("pt-BR")}
+      </span>
+      <span className="text-zinc-500">· {cov.toFixed(0)}% cob</span>
     </span>
   );
 }

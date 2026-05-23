@@ -113,6 +113,37 @@ class OddsSnapshot(Base):
     )
 
 
+class EventMatch(Base):
+    """Resolved link between a Polymarket event and an ExternalEvent row.
+
+    The matcher writes the best candidate per (polymarket_event_id, source).
+    Score components are kept individually so we can audit a bad match later.
+    """
+
+    __tablename__ = "event_matches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    polymarket_event_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    external_event_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False)
+    home_score: Mapped[float] = mapped_column(Float, nullable=False)
+    away_score: Mapped[float] = mapped_column(Float, nullable=False)
+    time_delta_minutes: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_now, onupdate=_now, nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "polymarket_event_id", "source", name="uq_match_polyev_source"
+        ),
+        Index("idx_match_polyev", "polymarket_event_id"),
+        Index("idx_match_extev", "external_event_id"),
+    )
+
+
 class ExternalEvent(Base):
     """An event as seen by an external odds source (Pinnacle, Betano, the-odds-api, ...).
 

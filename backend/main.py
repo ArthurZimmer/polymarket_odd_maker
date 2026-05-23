@@ -3,6 +3,7 @@
 Lifespan owns the long-running asyncio tasks:
   - PolymarketWatcher (WS realtime)
   - ScrapingCoordinator (Pinnacle today; more in Etapa 8)
+  - EventMatcher (links PM events to external_events)
 EV engine, Trading engine, Position manager land in later etapas.
 """
 from __future__ import annotations
@@ -16,12 +17,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api import auth as auth_routes
 from backend.api import filters as filters_routes
+from backend.api import matcher as matcher_routes
 from backend.api import scrapers as scrapers_routes
 from backend.api import wallet as wallet_routes
 from backend.api import watcher as watcher_routes
 from backend.config import settings
 from backend.db import SessionLocal
 from backend.engine.odds_bus import OddsBus
+from backend.matcher.matcher import EventMatcher
 from backend.polymarket.watcher import PolymarketWatcher
 from backend.scrapers.coordinator import ScrapingCoordinator
 
@@ -40,25 +43,30 @@ async def lifespan(app: FastAPI):
     bus = OddsBus()
     watcher = PolymarketWatcher(bus=bus, session_factory=SessionLocal)
     coordinator = ScrapingCoordinator(bus=bus, session_factory=SessionLocal)
+    matcher = EventMatcher(session_factory=SessionLocal)
     app.state.bus = bus
     app.state.watcher = watcher
     app.state.scrapers = coordinator
+    app.state.matcher = matcher
     watcher_task = asyncio.create_task(watcher.run(), name="polymarket-watcher")
+    matcher_task = asyncio.create_task(matcher.run(), name="event-matcher")
     coordinator.start()
 
     try:
         yield
     finally:
-        logger.info("Stopping watcher + scrapers...")
+        logger.info("Stopping watcher + scrapers + matcher...")
         watcher.stop()
+        matcher.stop()
         await coordinator.stop()
-        try:
-            await asyncio.wait_for(watcher_task, timeout=5.0)
-        except asyncio.TimeoutError:
-            logger.warning("Watcher did not stop in time; cancelling")
-            watcher_task.cancel()
-        except Exception:
-            logger.exception("Watcher exited with error")
+        for name, task in (("watcher", watcher_task), ("matcher", matcher_task)):
+            try:
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("%s did not stop in time; cancelling", name)
+                task.cancel()
+            except Exception:
+                logger.exception("%s exited with error", name)
         logger.info("poly-scraper backend stopped")
 
 
@@ -83,3 +91,4 @@ app.include_router(wallet_routes.router)
 app.include_router(filters_routes.router)
 app.include_router(watcher_routes.router)
 app.include_router(scrapers_routes.router)
+app.include_router(matcher_routes.router)

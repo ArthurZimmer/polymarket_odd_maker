@@ -149,3 +149,22 @@ export interface ScraperStatus {
   last_latency_ms: number | null;
   runs_per_min: number;
 }
+
+export interface SportCoverage {
+  parseable: number;
+  matchable: number;
+  matched: number;
+}
+
+export interface MatcherStatus {
+  last_run_at: string | null;
+  last_run_duration_ms: number | null;
+  total_runs: number;
+  last_pm_events_scanned: number;
+  last_pm_events_parseable: number;
+  last_pm_events_matchable: number;
+  last_matches_written: number;
+  last_matches_total: number;
+  coverage_pct: number;
+  coverage_by_sport: Record<string, SportCoverage>;
+}

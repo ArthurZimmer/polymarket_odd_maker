@@ -6,13 +6,15 @@ in Etapa 4/Etapa 9 where needed.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
-DEFAULT_PAGE_SIZE = 500
-MAX_PAGES = 4  # cap discovery at ~2k events to keep the request budget sane
+# Gamma caps page size at 100 server-side even when we ask for more. Match it.
+DEFAULT_PAGE_SIZE = 100
+MAX_PAGES = 30  # cap discovery at ~3k events to keep the request budget sane
 
 
 class PolymarketGammaClient:
@@ -39,6 +41,9 @@ class PolymarketGammaClient:
         Paginated. Stops when a page returns fewer than `page_size` records
         (or `max_pages` is hit).
         """
+        # Without end_date_min Gamma returns ages of already-resolved events
+        # whose `closed` flag never flipped — filter them out at the source.
+        now_iso = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         out: list[dict[str, Any]] = []
         for page in range(max_pages):
             params: dict[str, Any] = {
@@ -50,13 +55,16 @@ class PolymarketGammaClient:
                 "offset": page * page_size,
                 "order": "endDate",
                 "ascending": "true",
+                "end_date_min": now_iso,
             }
             resp = await self._client.get("/events", params=params)
             resp.raise_for_status()
             batch = resp.json()
-            if not isinstance(batch, list):
+            if not isinstance(batch, list) or not batch:
                 break
             out.extend(batch)
+            # Gamma may silently cap below `page_size` — stop only on an empty
+            # page (so we don't truncate when the cap is hit).
             if len(batch) < page_size:
                 break
         return out
