@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   apiFetch,
@@ -8,6 +8,8 @@ import {
   DecisionRow,
   EngineStatus,
   getToken,
+  OrderRow,
+  PositionRow,
 } from "@/lib/api";
 import { Nav } from "@/components/Nav";
 
@@ -33,6 +35,8 @@ export default function Home() {
   const [authChecked, setAuthChecked] = useState(false);
   const [engine, setEngine] = useState<EngineStatus | null>(null);
   const [rows, setRows] = useState<DecisionRow[]>([]);
+  const [positions, setPositions] = useState<PositionRow[]>([]);
+  const [orders, setOrders] = useState<OrderRow[]>([]);
   const [filter, setFilter] = useState<string>("ALL");
   const [error, setError] = useState<string | null>(null);
 
@@ -50,13 +54,17 @@ export default function Home() {
     async function poll() {
       try {
         const action = filter === "ALL" ? "" : `&action=${filter}`;
-        const [e, r] = await Promise.all([
+        const [e, r, p, o] = await Promise.all([
           apiFetch<EngineStatus>("/api/decisions/status"),
           apiFetch<DecisionRow[]>(`/api/decisions/recent?limit=${PAGE_SIZE}${action}`),
+          apiFetch<PositionRow[]>("/api/positions/open"),
+          apiFetch<OrderRow[]>("/api/orders/recent?limit=20"),
         ]);
         if (!alive) return;
         setEngine(e);
         setRows(r);
+        setPositions(p);
+        setOrders(o);
         setError(null);
       } catch (e) {
         if (e instanceof ApiError && e.status === 401) {
@@ -84,9 +92,11 @@ export default function Home() {
 
   return (
     <>
-      <Nav subtitle="Decision Feed (dry-run)" />
+      <Nav subtitle="Decision Feed" />
       <main className="flex-1 bg-zinc-50 px-6 py-6 dark:bg-zinc-950">
         <EngineSummary engine={engine} />
+        {positions.length > 0 && <PositionsTable positions={positions} />}
+        {orders.length > 0 && <RecentOrdersTable orders={orders} />}
         <FilterBar filter={filter} setFilter={setFilter} engine={engine} />
         {error && (
           <div className="mb-3 rounded border border-red-300 bg-red-50 p-2 text-sm text-red-700 dark:border-red-700 dark:bg-red-950 dark:text-red-300">
@@ -303,6 +313,101 @@ function ActionPill({ action }: { action: string }) {
   return (
     <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${cls}`}>
       {action.replace("PASS_", "")}
+    </span>
+  );
+}
+
+function PositionsTable({ positions }: { positions: PositionRow[] }) {
+  return (
+    <div className="mb-5 rounded border border-emerald-200 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950">
+      <div className="border-b border-emerald-200 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:border-emerald-800 dark:text-emerald-200">
+        Posições abertas ({positions.length})
+      </div>
+      <table className="w-full text-left text-xs">
+        <thead className="text-emerald-700/70 dark:text-emerald-300/70">
+          <tr>
+            <th className="px-3 py-1">Entrou</th>
+            <th className="px-3 py-1">Outcome</th>
+            <th className="px-3 py-1 text-right">Size</th>
+            <th className="px-3 py-1 text-right">Entry</th>
+            <th className="px-3 py-1">PM event</th>
+          </tr>
+        </thead>
+        <tbody>
+          {positions.map((p) => (
+            <tr key={p.id} className="border-t border-emerald-100 dark:border-emerald-900">
+              <td className="px-3 py-1 font-mono">
+                {new Date(p.entry_at).toLocaleTimeString("pt-BR")}
+              </td>
+              <td className="px-3 py-1">{p.outcome ?? "—"}</td>
+              <td className="px-3 py-1 text-right font-mono">{p.size.toFixed(2)}</td>
+              <td className="px-3 py-1 text-right font-mono">{p.entry_price.toFixed(4)}</td>
+              <td className="px-3 py-1 text-zinc-500">{p.polymarket_event_id}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RecentOrdersTable({ orders }: { orders: OrderRow[] }) {
+  return (
+    <div className="mb-5 rounded border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900">
+      <div className="border-b border-zinc-200 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-zinc-600 dark:border-zinc-800 dark:text-zinc-300">
+        Ordens recentes
+      </div>
+      <table className="w-full text-left text-xs">
+        <thead className="text-zinc-500">
+          <tr>
+            <th className="px-3 py-1">Hora</th>
+            <th className="px-3 py-1">Status</th>
+            <th className="px-3 py-1">Outcome</th>
+            <th className="px-3 py-1 text-right">Price</th>
+            <th className="px-3 py-1 text-right">Size</th>
+            <th className="px-3 py-1 text-right">Notional</th>
+            <th className="px-3 py-1">Erro</th>
+          </tr>
+        </thead>
+        <tbody>
+          {orders.map((o) => (
+            <tr key={o.id} className="border-t border-zinc-100 dark:border-zinc-800">
+              <td className="px-3 py-1 font-mono text-zinc-500">
+                {new Date(o.created_at).toLocaleTimeString("pt-BR")}
+              </td>
+              <td className="px-3 py-1">
+                <OrderStatusPill status={o.status} />
+              </td>
+              <td className="px-3 py-1">{o.outcome ?? "—"}</td>
+              <td className="px-3 py-1 text-right font-mono">{o.price.toFixed(4)}</td>
+              <td className="px-3 py-1 text-right font-mono">
+                {o.size.toFixed(2)}
+                {o.filled_size > 0 && o.filled_size < o.size && (
+                  <span className="ml-1 text-zinc-500">/{o.filled_size.toFixed(2)}</span>
+                )}
+              </td>
+              <td className="px-3 py-1 text-right font-mono">${o.notional_usd.toFixed(2)}</td>
+              <td className="px-3 py-1 text-red-600 max-w-xs truncate">{o.last_error ?? ""}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function OrderStatusPill({ status }: { status: string }) {
+  const cls =
+    status === "FILLED"
+      ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200"
+      : status === "SUBMITTED" || status === "PENDING_SUBMIT"
+        ? "bg-amber-100 text-amber-700 dark:bg-amber-900 dark:text-amber-200"
+        : status === "FAILED"
+          ? "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-200"
+          : "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300";
+  return (
+    <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${cls}`}>
+      {status}
     </span>
   );
 }

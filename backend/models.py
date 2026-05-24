@@ -241,3 +241,108 @@ class DecisionLog(Base):
         Index("idx_dlog_event", "polymarket_event_id"),
         Index("idx_dlog_action", "action", "captured_at"),
     )
+
+
+class BotState(Base):
+    """Single-row global control panel for the live bot.
+
+    `is_running` is the master switch: when False the TradingEngine sees
+    decisions but never sends an order. Risk knobs live here too — the
+    DecisionEngine and RiskManager read them every cycle.
+    """
+
+    __tablename__ = "bot_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)  # always 1
+    is_running: Mapped[bool] = mapped_column(default=False, nullable=False)
+    master_stake_usd: Mapped[float] = mapped_column(Float, default=5.0, nullable=False)
+    ev_threshold: Mapped[float] = mapped_column(Float, default=0.03, nullable=False)
+    exit_threshold: Mapped[float] = mapped_column(Float, default=0.005, nullable=False)
+    max_concurrent_positions: Mapped[int] = mapped_column(
+        Integer, default=5, nullable=False
+    )
+    max_daily_drawdown_usd: Mapped[float] = mapped_column(
+        Float, default=100.0, nullable=False
+    )
+    min_time_to_game_minutes: Mapped[int] = mapped_column(
+        Integer, default=5, nullable=False
+    )
+    max_time_to_game_minutes: Mapped[int] = mapped_column(
+        Integer, default=120, nullable=False
+    )
+    min_ask_depth_usd: Mapped[float] = mapped_column(
+        Float, default=100.0, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_now, onupdate=_now, nullable=False
+    )
+
+    __table_args__ = (CheckConstraint("id = 1", name="bot_state_single_row"),)
+
+
+class Order(Base):
+    """A LIMIT order the bot tried to place on Polymarket.
+
+    Status lifecycle:
+        PENDING_SUBMIT → SUBMITTED → (FILLED | PARTIAL | CANCELLED | FAILED)
+    `polymarket_order_id` is null until the CLOB ACKs the submission. Use
+    `last_error` to record failed submits without losing the row.
+    """
+
+    __tablename__ = "orders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    polymarket_order_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    polymarket_event_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    token_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    outcome: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    side: Mapped[str] = mapped_column(String(8), nullable=False)  # BUY|SELL
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    size: Mapped[float] = mapped_column(Float, nullable=False)  # shares
+    notional_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    order_type: Mapped[str] = mapped_column(String(8), default="GTC", nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    filled_size: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    filled_avg_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_polled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    filled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("polymarket_order_id", name="uq_orders_pm_id"),
+        Index("idx_orders_status_ts", "status", "created_at"),
+        Index("idx_orders_token", "token_id"),
+    )
+
+
+class Position(Base):
+    """A filled BUY producing a long position on one Polymarket token.
+
+    Etapa 10 will set `exit_*` and `pnl_usd` when the PositionManager closes
+    out. For now we only ever create OPEN positions; closing is a stub.
+    """
+
+    __tablename__ = "positions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    polymarket_event_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    token_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    outcome: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    size: Mapped[float] = mapped_column(Float, nullable=False)
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    entry_at: Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    pnl_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="OPEN", nullable=False)
+    entry_order_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    exit_order_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        Index("idx_positions_status", "status"),
+        Index("idx_positions_token", "token_id"),
+    )

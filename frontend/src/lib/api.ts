@@ -218,3 +218,83 @@ export interface DecisionRow {
   proposed_price: number | null;
   seconds_to_kickoff: number | null;
 }
+
+export interface BotState {
+  is_running: boolean;
+  master_stake_usd: number;
+  ev_threshold: number;
+  exit_threshold: number;
+  max_concurrent_positions: number;
+  max_daily_drawdown_usd: number;
+  min_time_to_game_minutes: number;
+  max_time_to_game_minutes: number;
+  min_ask_depth_usd: number;
+  vault_unlocked: boolean;
+  updated_at: string;
+}
+
+export type BotStatePatch = Partial<Omit<BotState, "vault_unlocked" | "updated_at">>;
+
+export interface TradingStats {
+  last_run_at: string | null;
+  total_runs: number;
+  total_orders_attempted: number;
+  total_orders_submitted: number;
+  total_orders_failed: number;
+  total_fills: number;
+  last_error: string | null;
+  last_action_summary: Record<string, number | string>;
+  bot_running: boolean;
+  vault_unlocked: boolean;
+}
+
+export interface TradingStatus {
+  running: boolean;
+  stats: TradingStats | null;
+}
+
+export type OrderStatus =
+  | "PENDING_SUBMIT"
+  | "SUBMITTED"
+  | "FILLED"
+  | "PARTIAL"
+  | "CANCELLED"
+  | "FAILED";
+
+export interface OrderRow {
+  id: number;
+  polymarket_order_id: string | null;
+  polymarket_event_id: string | null;
+  token_id: string;
+  outcome: string | null;
+  side: string;
+  price: number;
+  size: number;
+  notional_usd: number;
+  order_type: string;
+  status: OrderStatus;
+  filled_size: number;
+  filled_avg_price: number | null;
+  decision_id: number | null;
+  last_error: string | null;
+  created_at: string;
+  submitted_at: string | null;
+  filled_at: string | null;
+  cancelled_at: string | null;
+}
+
+export interface PositionRow {
+  id: number;
+  polymarket_event_id: string | null;
+  token_id: string;
+  outcome: string | null;
+  size: number;
+  entry_price: number;
+  entry_at: string;
+  exit_price: number | null;
+  exit_at: string | null;
+  pnl_usd: number | null;
+  status: "OPEN" | "CLOSED";
+  entry_order_id: number | null;
+  exit_order_id: number | null;
+}

@@ -10,11 +10,13 @@ import {
   WatcherStatus,
   ScraperStatus,
   MatcherStatus,
+  BotState,
 } from "@/lib/api";
 
 const links: Array<{ href: string; label: string }> = [
   { href: "/config/wallet", label: "Wallet" },
   { href: "/config/markets", label: "Filtros" },
+  { href: "/config/risk", label: "Risk" },
 ];
 
 export function Nav({ subtitle }: { subtitle?: string }) {
@@ -23,20 +25,23 @@ export function Nav({ subtitle }: { subtitle?: string }) {
   const [status, setStatus] = useState<WatcherStatus | null>(null);
   const [scrapers, setScrapers] = useState<ScraperStatus[] | null>(null);
   const [matcher, setMatcher] = useState<MatcherStatus | null>(null);
+  const [bot, setBot] = useState<BotState | null>(null);
 
   useEffect(() => {
     let alive = true;
     async function poll() {
       try {
-        const [w, s, m] = await Promise.all([
+        const [w, s, m, b] = await Promise.all([
           apiFetch<WatcherStatus>("/api/watcher/status"),
           apiFetch<ScraperStatus[]>("/api/scrapers/status"),
           apiFetch<MatcherStatus>("/api/matcher/status"),
+          apiFetch<BotState>("/api/bot/state"),
         ]);
         if (!alive) return;
         setStatus(w);
         setScrapers(s);
         setMatcher(m);
+        setBot(b);
       } catch (e) {
         if (e instanceof ApiError && e.status === 401) {
           // logged out — let other pages handle the redirect
@@ -96,6 +101,7 @@ export function Nav({ subtitle }: { subtitle?: string }) {
         <WatcherPill status={status} />
         <ScrapersPill scrapers={scrapers} />
         <MatcherPill matcher={matcher} />
+        <BotPill bot={bot} />
         <button
           onClick={onLogout}
           className="rounded-md border border-zinc-300 px-3 py-1 text-sm text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
@@ -238,6 +244,48 @@ function MatcherPill({ matcher }: { matcher: MatcherStatus | null }) {
         Match {matcher.last_matches_total.toLocaleString("pt-BR")}
       </span>
       <span className="text-zinc-500">· {cov.toFixed(0)}% cob</span>
+    </span>
+  );
+}
+
+function BotPill({ bot }: { bot: BotState | null }) {
+  if (!bot) {
+    return (
+      <span className="rounded-full bg-zinc-100 px-3 py-1 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+        Bot …
+      </span>
+    );
+  }
+  const live = bot.is_running && bot.vault_unlocked;
+  const dot = live
+    ? "bg-emerald-500"
+    : bot.is_running
+      ? "bg-amber-500"
+      : "bg-zinc-400";
+  const label = live
+    ? "LIVE"
+    : bot.is_running
+      ? "ON · vault locked"
+      : "OFF";
+  const title =
+    `Bot ${label}\n` +
+    `Stake: $${bot.master_stake_usd.toFixed(2)} · EV≥${(bot.ev_threshold * 100).toFixed(1)}%\n` +
+    `Window: ${bot.min_time_to_game_minutes}–${bot.max_time_to_game_minutes}min · ` +
+    `max ${bot.max_concurrent_positions} concorrentes\n` +
+    `Drawdown lim: $${bot.max_daily_drawdown_usd.toFixed(0)}`;
+  return (
+    <span
+      className={
+        "flex items-center gap-2 rounded-full px-3 py-1 text-xs " +
+        (live
+          ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200"
+          : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300")
+      }
+      title={title}
+    >
+      <span className={`inline-block h-2 w-2 rounded-full ${dot}`} />
+      <span className="font-medium">{label}</span>
+      <span className="text-zinc-500">· ${bot.master_stake_usd.toFixed(0)}</span>
     </span>
   );
 }

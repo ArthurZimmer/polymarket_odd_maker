@@ -4,8 +4,9 @@ Lifespan owns the long-running asyncio tasks:
   - PolymarketWatcher (WS realtime)
   - ScrapingCoordinator (Pinnacle today; more in Etapa 8)
   - EventMatcher (links PM events to external_events)
-  - DecisionEngine (dry-run EV evaluator)
-Trading engine, Position manager land in later etapas.
+  - DecisionEngine (EV evaluator → decision_log)
+  - TradingEngine (executes BUYs; gated by BotState.is_running)
+Position manager / Risk land in later etapas.
 """
 from __future__ import annotations
 
@@ -17,9 +18,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api import auth as auth_routes
+from backend.api import bot as bot_routes
 from backend.api import decisions as decisions_routes
 from backend.api import filters as filters_routes
 from backend.api import matcher as matcher_routes
+from backend.api import orders as orders_routes
 from backend.api import scrapers as scrapers_routes
 from backend.api import wallet as wallet_routes
 from backend.api import watcher as watcher_routes
@@ -27,6 +30,7 @@ from backend.config import settings
 from backend.db import SessionLocal
 from backend.engine.decision import DecisionEngine
 from backend.engine.odds_bus import OddsBus
+from backend.engine.trading import TradingEngine
 from backend.matcher.matcher import EventMatcher
 from backend.polymarket.watcher import PolymarketWatcher
 from backend.scrapers.coordinator import ScrapingCoordinator
@@ -48,31 +52,37 @@ async def lifespan(app: FastAPI):
     coordinator = ScrapingCoordinator(bus=bus, session_factory=SessionLocal)
     matcher = EventMatcher(session_factory=SessionLocal)
     decision_engine = DecisionEngine(session_factory=SessionLocal, dry_run=True)
+    trading_engine = TradingEngine(session_factory=SessionLocal)
     app.state.bus = bus
     app.state.watcher = watcher
     app.state.scrapers = coordinator
     app.state.matcher = matcher
     app.state.decision_engine = decision_engine
+    app.state.trading_engine = trading_engine
     watcher_task = asyncio.create_task(watcher.run(), name="polymarket-watcher")
     matcher_task = asyncio.create_task(matcher.run(), name="event-matcher")
     decision_task = asyncio.create_task(decision_engine.run(), name="decision-engine")
+    trading_task = asyncio.create_task(trading_engine.run(), name="trading-engine")
     coordinator.start()
 
     try:
         yield
     finally:
-        logger.info("Stopping watcher + scrapers + matcher + engine...")
+        logger.info("Stopping watcher + scrapers + matcher + engines...")
+        # Trading first — it tries to cancel live orders before letting go.
+        trading_engine.stop()
         watcher.stop()
         matcher.stop()
         decision_engine.stop()
         await coordinator.stop()
         for name, task in (
+            ("trading", trading_task),
             ("watcher", watcher_task),
             ("matcher", matcher_task),
             ("decision", decision_task),
         ):
             try:
-                await asyncio.wait_for(task, timeout=5.0)
+                await asyncio.wait_for(task, timeout=15.0)
             except asyncio.TimeoutError:
                 logger.warning("%s did not stop in time; cancelling", name)
                 task.cancel()
@@ -104,3 +114,5 @@ app.include_router(watcher_routes.router)
 app.include_router(scrapers_routes.router)
 app.include_router(matcher_routes.router)
 app.include_router(decisions_routes.router)
+app.include_router(bot_routes.router)
+app.include_router(orders_routes.router)
