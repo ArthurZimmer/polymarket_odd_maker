@@ -169,8 +169,15 @@ class DecisionEngine:
                 await self._finalize(started, n_eval, n_buy, passes)
                 return
 
+            # Group matches by PM event — a single PM event may have multiple
+            # external matches (Pinnacle + the_odds_api). We aggregate odds
+            # across all of them per evaluation.
+            matches_by_pm: dict[str, list[EventMatch]] = defaultdict(list)
+            for m in matches:
+                matches_by_pm[m.polymarket_event_id].append(m)
+
             # Pre-load token rows for matched events
-            event_ids = {m.polymarket_event_id for m in matches}
+            event_ids = set(matches_by_pm.keys())
             tokens_by_event: dict[str, list[PolymarketToken]] = defaultdict(list)
             tok_rows = (
                 await session.execute(
@@ -182,7 +189,7 @@ class DecisionEngine:
             for t in tok_rows:
                 tokens_by_event[t.polymarket_event_id].append(t)
 
-            # Index external_events by id (for home/away/start_time lookups)
+            # Index external_events by id
             ext_ids = {m.external_event_id for m in matches}
             ext_rows = (
                 await session.execute(
@@ -192,23 +199,25 @@ class DecisionEngine:
             ext_by_id = {e.id: e for e in ext_rows}
 
             now = datetime.now(UTC)
-            for match in matches:
-                ext = ext_by_id.get(match.external_event_id)
-                if ext is None:
+            for pm_event_id, event_matches in matches_by_pm.items():
+                title = titles.get(pm_event_id)
+                # Pick the canonical external event for window/team-name use —
+                # prefer Pinnacle when present (its start_time tends to be the
+                # most reliable kickoff time), else the first match.
+                canonical_ext = self._pick_canonical_ext(event_matches, ext_by_id)
+                if canonical_ext is None:
                     continue
-                title = titles.get(match.polymarket_event_id)
-                start_time = _as_utc(ext.start_time)
+                start_time = _as_utc(canonical_ext.start_time)
                 seconds_to_kickoff = (start_time - now).total_seconds()
 
-                # Window gate (applied per-event, not per-token, so we don't
-                # waste cycles evaluating tokens for events out of scope).
+                # Window gate (per PM event, not per token).
                 if seconds_to_kickoff > MAX_TIME_TO_GAME_S:
                     await self._log_one(
                         session,
                         action=Action.PASS_WINDOW_EARLY,
                         reason=f"kickoff in {seconds_to_kickoff/60:.0f}min (> {MAX_TIME_TO_GAME_S/60:.0f}min)",
-                        match=match,
-                        ext=ext,
+                        match=event_matches[0],
+                        ext=canonical_ext,
                         title=title,
                         seconds_to_kickoff=seconds_to_kickoff,
                     )
@@ -220,8 +229,8 @@ class DecisionEngine:
                         session,
                         action=Action.PASS_WINDOW_LATE,
                         reason=f"kickoff in {seconds_to_kickoff/60:.0f}min (< {MIN_TIME_TO_GAME_S/60:.0f}min) — live or imminent",
-                        match=match,
-                        ext=ext,
+                        match=event_matches[0],
+                        ext=canonical_ext,
                         title=title,
                         seconds_to_kickoff=seconds_to_kickoff,
                     )
@@ -229,17 +238,17 @@ class DecisionEngine:
                     n_eval += 1
                     continue
 
-                # Cache Pinnacle devig once per event
-                pin_probs_devigged = await self._latest_devigged_pinnacle(
-                    session, ext, now
+                # Devigged probs per book, aggregated across all matched ext_events.
+                probs_by_book = await self._devigged_probs_by_book(
+                    session, event_matches, ext_by_id, now
                 )
-                if pin_probs_devigged is None:
+                if not probs_by_book:
                     await self._log_one(
                         session,
                         action=Action.PASS_NO_EXT_SNAP,
-                        reason="no recent pinnacle snapshot or devig failed",
-                        match=match,
-                        ext=ext,
+                        reason="no recent external snapshot or devig failed across all sources",
+                        match=event_matches[0],
+                        ext=canonical_ext,
                         title=title,
                         seconds_to_kickoff=seconds_to_kickoff,
                     )
@@ -247,13 +256,13 @@ class DecisionEngine:
                     n_eval += 1
                     continue
 
-                for token in tokens_by_event.get(match.polymarket_event_id, []):
+                for token in tokens_by_event.get(pm_event_id, []):
                     n_eval += 1
                     action, reason, log_extra = await self._evaluate_token(
                         session,
                         token=token,
-                        ext=ext,
-                        pin_probs=pin_probs_devigged,
+                        ext=canonical_ext,
+                        probs_by_book=probs_by_book,
                         now=now,
                     )
                     if action == Action.BUY:
@@ -264,8 +273,8 @@ class DecisionEngine:
                         session,
                         action=action,
                         reason=reason,
-                        match=match,
-                        ext=ext,
+                        match=event_matches[0],
+                        ext=canonical_ext,
                         title=title,
                         token=token,
                         seconds_to_kickoff=seconds_to_kickoff,
@@ -275,6 +284,20 @@ class DecisionEngine:
             await session.commit()
 
         await self._finalize(started, n_eval, n_buy, passes)
+
+    @staticmethod
+    def _pick_canonical_ext(
+        matches: list[EventMatch], ext_by_id: dict[int, ExternalEvent]
+    ) -> ExternalEvent | None:
+        # Pinnacle wins; otherwise first valid.
+        pin_first = sorted(
+            matches, key=lambda m: (0 if m.source == "pinnacle" else 1, m.id)
+        )
+        for m in pin_first:
+            ext = ext_by_id.get(m.external_event_id)
+            if ext is not None:
+                return ext
+        return None
 
     async def _finalize(
         self,
@@ -316,56 +339,79 @@ class DecisionEngine:
         rows = (await session.execute(select(EventMatch))).scalars().all()
         return list(rows)
 
-    async def _latest_devigged_pinnacle(
-        self, session: AsyncSession, ext: ExternalEvent, now: datetime
-    ) -> dict[str, float] | None:
-        """Pull the latest Pinnacle snapshot per outcome side for this event
-        and devig the implied probs. Returns {'home':p, 'away':p, 'draw'?:p}.
-        """
-        cutoff = now - timedelta(seconds=SNAPSHOT_MAX_AGE_S * 6)  # be a bit forgiving
-        ev_id_str = f"pinnacle:{ext.source_event_id}"
-        rows = (
-            await session.execute(
-                select(OddsSnapshot)
-                .where(
-                    and_(
-                        OddsSnapshot.source == "pinnacle",
-                        OddsSnapshot.event_id == ev_id_str,
-                        OddsSnapshot.captured_at >= cutoff.replace(tzinfo=None),
-                    )
-                )
-                .order_by(desc(OddsSnapshot.captured_at))
-                .limit(50)
-            )
-        ).scalars().all()
-        if not rows:
-            return None
-        # First occurrence per outcome name is the freshest.
-        latest_by_outcome: dict[str, OddsSnapshot] = {}
-        for r in rows:
-            if r.outcome and r.outcome not in latest_by_outcome:
-                latest_by_outcome[r.outcome] = r
-        # Map outcome name → side via the external_event's teams.
-        from backend.engine.ev import map_pm_outcome_to_side  # local to avoid cycles
+    async def _devigged_probs_by_book(
+        self,
+        session: AsyncSession,
+        matches: list[EventMatch],
+        ext_by_id: dict[int, ExternalEvent],
+        now: datetime,
+    ) -> dict[str, dict[str, float]]:
+        """Aggregate snapshots across all matched external events for a single
+        PM event, group by `snapshot.source` (the actual book key), then devig
+        each book independently. Returns `{book_key: {side: prob}}`.
 
-        raw_probs: dict[str, float] = {}
-        for outcome_name, snap in latest_by_outcome.items():
-            side = map_pm_outcome_to_side(outcome_name, ext.home_team, ext.away_team)
-            if side is None:
-                # Pinnacle outcome name is the raw team name; if mapping fails
-                # the team probably doesn't match the canonical home/away (rare).
+        Walks each match → external_event → snapshots-with-event_id-prefix.
+        Different scrapers prefix differently:
+          - PinnacleScraper       → event_id="pinnacle:{matchup_id}", source="pinnacle"
+          - TheOddsApiScraper     → event_id="the_odds_api:{id}",     source="bet365"|...
+        Both schemes are handled by querying by event_id only.
+        """
+        cutoff = now - timedelta(seconds=SNAPSHOT_MAX_AGE_S * 6)
+        cutoff_naive = cutoff.replace(tzinfo=None)
+        per_book_raw: dict[str, dict[str, float]] = defaultdict(dict)
+
+        for match in matches:
+            ext = ext_by_id.get(match.external_event_id)
+            if ext is None:
                 continue
-            decimal_odd = snap.best_ask
-            prob = implied_prob_from_decimal(decimal_odd) if decimal_odd else None
-            if prob is None:
+            event_id_str = f"{ext.source}:{ext.source_event_id}"
+            rows = (
+                await session.execute(
+                    select(OddsSnapshot)
+                    .where(
+                        and_(
+                            OddsSnapshot.event_id == event_id_str,
+                            OddsSnapshot.captured_at >= cutoff_naive,
+                        )
+                    )
+                    .order_by(desc(OddsSnapshot.captured_at))
+                    .limit(200)
+                )
+            ).scalars().all()
+            # Keep the freshest per (book, outcome name).
+            seen: set[tuple[str, str]] = set()
+            for r in rows:
+                if not r.source or not r.outcome:
+                    continue
+                key = (r.source, r.outcome)
+                if key in seen:
+                    continue
+                seen.add(key)
+                side = map_pm_outcome_to_side(r.outcome, ext.home_team, ext.away_team)
+                if side is None:
+                    continue
+                prob = (
+                    implied_prob_from_decimal(r.best_ask)
+                    if r.best_ask is not None
+                    else None
+                )
+                if prob is None:
+                    continue
+                # Don't overwrite a side already filled from an earlier match
+                # — multiple ExternalEvents can refer to the same physical
+                # game; the first one in we trust.
+                per_book_raw[r.source].setdefault(side, prob)
+
+        if not per_book_raw:
+            return {}
+
+        out: dict[str, dict[str, float]] = {}
+        for book_key, raw in per_book_raw.items():
+            devigged = devig_simple(raw)
+            if devigged is None:
                 continue
-            raw_probs[side] = prob
-        if not raw_probs:
-            return None
-        devigged = devig_simple(raw_probs)
-        if devigged is None:
-            return None
-        return devigged.probs
+            out[book_key] = devigged.probs
+        return out
 
     async def _evaluate_token(
         self,
@@ -373,12 +419,11 @@ class DecisionEngine:
         *,
         token: PolymarketToken,
         ext: ExternalEvent,
-        pin_probs: dict[str, float],
+        probs_by_book: dict[str, dict[str, float]],
         now: datetime,
     ) -> tuple[str, str, dict[str, Any]]:
-        # Outcome side
         side = map_pm_outcome_to_side(token.outcome, ext.home_team, ext.away_team)
-        if side is None or side not in pin_probs:
+        if side is None:
             return (
                 Action.PASS_NO_MAP,
                 f"can't map PM outcome {token.outcome!r} → home/away/draw",
@@ -404,12 +449,15 @@ class DecisionEngine:
                 "no recent polymarket snapshot or missing ask",
                 {"outcome_side": side},
             )
-        # Sanity bounds on fair prob
-        fair_prob = consensus_fair_prob({"pinnacle": pin_probs[side]})
+        # Per-book probs for this side; build the weighted consensus.
+        side_probs_per_book: dict[str, float] = {
+            book: probs[side] for book, probs in probs_by_book.items() if side in probs
+        }
+        fair_prob = consensus_fair_prob(side_probs_per_book)
         if fair_prob is None:
             return (
                 Action.PASS_DEVIG_FAILED,
-                "consensus fair prob unavailable",
+                f"no devigged probs for {side} across {sorted(probs_by_book.keys())}",
                 {"outcome_side": side},
             )
         if not (MIN_FAIR_PROB <= fair_prob <= MAX_FAIR_PROB):
@@ -422,10 +470,9 @@ class DecisionEngine:
                     "poly_best_bid": poly.best_bid,
                     "poly_best_ask": poly.best_ask,
                     "poly_ask_depth_usd": poly.ask_depth_usd,
-                    "pinnacle_raw_prob": pin_probs[side],
+                    "pinnacle_raw_prob": side_probs_per_book.get("pinnacle"),
                 },
             )
-        # Liquidity
         depth = poly.ask_depth_usd or 0.0
         if depth < MIN_ASK_DEPTH_USD:
             return (
@@ -437,18 +484,18 @@ class DecisionEngine:
                     "poly_best_bid": poly.best_bid,
                     "poly_best_ask": poly.best_ask,
                     "poly_ask_depth_usd": depth,
-                    "pinnacle_raw_prob": pin_probs[side],
+                    "pinnacle_raw_prob": side_probs_per_book.get("pinnacle"),
                 },
             )
-        # EV
         ev = compute_ev_buy(fair_prob, poly.best_ask)
+        book_summary = ",".join(sorted(side_probs_per_book.keys()))
         log_extra = {
             "outcome_side": side,
             "fair_prob": fair_prob,
             "poly_best_bid": poly.best_bid,
             "poly_best_ask": poly.best_ask,
             "poly_ask_depth_usd": depth,
-            "pinnacle_raw_prob": pin_probs[side],
+            "pinnacle_raw_prob": side_probs_per_book.get("pinnacle"),
             "ev": ev,
             "proposed_price": poly.best_ask,
             "proposed_stake_usd": min(MASTER_STAKE_USD, depth),
@@ -456,10 +503,14 @@ class DecisionEngine:
         if ev < EV_THRESHOLD:
             return (
                 Action.PASS_LOW_EV,
-                f"EV {ev*100:.2f}% < {EV_THRESHOLD*100:.0f}%",
+                f"EV {ev*100:.2f}% on {side} ({book_summary})",
                 log_extra,
             )
-        return (Action.BUY, f"EV {ev*100:.2f}% on {side}", log_extra)
+        return (
+            Action.BUY,
+            f"EV {ev*100:.2f}% on {side} ({book_summary})",
+            log_extra,
+        )
 
     async def _log_one(
         self,

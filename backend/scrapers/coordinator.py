@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from backend.config import settings
 from backend.engine.odds_bus import OddsBus
+from backend.scrapers.aggregators.the_odds_api import TheOddsApiScraper
 from backend.scrapers.base import BookmakerScraper
 from backend.scrapers.pinnacle import PinnacleScraper
 
@@ -17,8 +19,17 @@ class ScrapingCoordinator:
         self.session_factory = session_factory
         self.scrapers: list[BookmakerScraper] = [
             PinnacleScraper(bus=bus, session_factory=session_factory),
-            # Etapa 8 acrescenta: TheOddsApiScraper, BetanoScraper, EstrelaBetScraper, SuperbetScraper
+            TheOddsApiScraper(
+                bus=bus,
+                session_factory=session_factory,
+                api_key=settings.the_odds_api_key,
+            ),
+            # Etapa 8.5: BetanoScraper, EstrelaBetScraper, SuperbetScraper
         ]
+        if not settings.the_odds_api_key:
+            logger.info(
+                "TheOddsApi scraper mounted but inert — set THE_ODDS_API_KEY in .env to enable"
+            )
         self._tasks: list[asyncio.Task] = []
 
     def start(self) -> None:
