@@ -168,3 +168,53 @@ export interface MatcherStatus {
   coverage_pct: number;
   coverage_by_sport: Record<string, SportCoverage>;
 }
+
+export interface EngineStatus {
+  last_run_at: string | null;
+  last_run_duration_ms: number | null;
+  total_runs: number;
+  last_evaluations: number;
+  last_buys: number;
+  last_passes_by_reason: Record<string, number>;
+  total_buys: number;
+  total_passes: number;
+  total_decisions: number;
+  dry_run: boolean;
+}
+
+export type DecisionAction =
+  | "BUY"
+  | "PASS_LOW_EV"
+  | "PASS_WINDOW_EARLY"
+  | "PASS_WINDOW_LATE"
+  | "PASS_LIQUIDITY"
+  | "PASS_NO_MATCH"
+  | "PASS_NO_POLY_SNAP"
+  | "PASS_NO_EXT_SNAP"
+  | "PASS_DEVIG_FAILED"
+  | "PASS_NO_MAP"
+  | "PASS_FAIR_BOUNDS"
+  | "ERROR";
+
+export interface DecisionRow {
+  id: number;
+  captured_at: string;
+  polymarket_event_id: string;
+  polymarket_token_id: string | null;
+  pm_outcome: string | null;
+  outcome_side: string | null;
+  sport: string | null;
+  league: string | null;
+  pm_event_title: string | null;
+  action: DecisionAction;
+  reason: string | null;
+  fair_prob: number | null;
+  poly_best_bid: number | null;
+  poly_best_ask: number | null;
+  poly_ask_depth_usd: number | null;
+  pinnacle_decimal_odd: number | null;
+  ev: number | null;
+  proposed_stake_usd: number | null;
+  proposed_price: number | null;
+  seconds_to_kickoff: number | null;
+}

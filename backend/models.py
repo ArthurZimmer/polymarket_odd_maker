@@ -171,3 +171,73 @@ class ExternalEvent(Base):
         Index("idx_extev_source_start", "source", "start_time"),
         Index("idx_extev_teams_start", "home_team", "away_team", "start_time"),
     )
+
+
+class PolymarketToken(Base):
+    """One CLOB token (asset_id) per (event, outcome). Persisted so the EV
+    engine can look up which side a token represents without going through
+    the watcher's in-memory index.
+    """
+
+    __tablename__ = "polymarket_tokens"
+
+    token_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    polymarket_event_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    market_condition_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    outcome: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Heuristic: which side of the matched external event this PM outcome
+    # represents — 'home' | 'away' | 'draw' — or NULL until inferred.
+    outcome_side: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_now, onupdate=_now, nullable=False
+    )
+
+    __table_args__ = (
+        Index("idx_pmtoken_event", "polymarket_event_id"),
+    )
+
+
+class DecisionLog(Base):
+    """Every EV evaluation the engine performs, regardless of outcome.
+
+    Logged in dry-run mode too — this is the audit trail and the data source
+    for the realtime DecisionFeed in the dashboard. Keep schema flat so the
+    UI doesn't need joins.
+    """
+
+    __tablename__ = "decision_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_now, nullable=False
+    )
+    polymarket_event_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    polymarket_token_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    pm_outcome: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    outcome_side: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    sport: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    league: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    pm_event_title: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Decision outcome: BUY | PASS_LOW_EV | PASS_WINDOW | PASS_LIQUIDITY |
+    # PASS_NO_MATCH | PASS_NO_POLY_SNAP | PASS_NO_EXT_SNAP | PASS_DEVIG_FAILED
+    # | ERROR
+    action: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    # Inputs (snapshot at decision time)
+    fair_prob: Mapped[float | None] = mapped_column(Float, nullable=True)
+    poly_best_bid: Mapped[float | None] = mapped_column(Float, nullable=True)
+    poly_best_ask: Mapped[float | None] = mapped_column(Float, nullable=True)
+    poly_ask_depth_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pinnacle_decimal_odd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pinnacle_raw_prob: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Outputs (would-be order, dry-run)
+    ev: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proposed_stake_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proposed_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    seconds_to_kickoff: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    __table_args__ = (
+        Index("idx_dlog_ts", "captured_at"),
+        Index("idx_dlog_event", "polymarket_event_id"),
+        Index("idx_dlog_action", "action", "captured_at"),
+    )

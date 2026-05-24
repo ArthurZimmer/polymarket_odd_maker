@@ -4,7 +4,8 @@ Lifespan owns the long-running asyncio tasks:
   - PolymarketWatcher (WS realtime)
   - ScrapingCoordinator (Pinnacle today; more in Etapa 8)
   - EventMatcher (links PM events to external_events)
-EV engine, Trading engine, Position manager land in later etapas.
+  - DecisionEngine (dry-run EV evaluator)
+Trading engine, Position manager land in later etapas.
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api import auth as auth_routes
+from backend.api import decisions as decisions_routes
 from backend.api import filters as filters_routes
 from backend.api import matcher as matcher_routes
 from backend.api import scrapers as scrapers_routes
@@ -23,6 +25,7 @@ from backend.api import wallet as wallet_routes
 from backend.api import watcher as watcher_routes
 from backend.config import settings
 from backend.db import SessionLocal
+from backend.engine.decision import DecisionEngine
 from backend.engine.odds_bus import OddsBus
 from backend.matcher.matcher import EventMatcher
 from backend.polymarket.watcher import PolymarketWatcher
@@ -44,22 +47,30 @@ async def lifespan(app: FastAPI):
     watcher = PolymarketWatcher(bus=bus, session_factory=SessionLocal)
     coordinator = ScrapingCoordinator(bus=bus, session_factory=SessionLocal)
     matcher = EventMatcher(session_factory=SessionLocal)
+    decision_engine = DecisionEngine(session_factory=SessionLocal, dry_run=True)
     app.state.bus = bus
     app.state.watcher = watcher
     app.state.scrapers = coordinator
     app.state.matcher = matcher
+    app.state.decision_engine = decision_engine
     watcher_task = asyncio.create_task(watcher.run(), name="polymarket-watcher")
     matcher_task = asyncio.create_task(matcher.run(), name="event-matcher")
+    decision_task = asyncio.create_task(decision_engine.run(), name="decision-engine")
     coordinator.start()
 
     try:
         yield
     finally:
-        logger.info("Stopping watcher + scrapers + matcher...")
+        logger.info("Stopping watcher + scrapers + matcher + engine...")
         watcher.stop()
         matcher.stop()
+        decision_engine.stop()
         await coordinator.stop()
-        for name, task in (("watcher", watcher_task), ("matcher", matcher_task)):
+        for name, task in (
+            ("watcher", watcher_task),
+            ("matcher", matcher_task),
+            ("decision", decision_task),
+        ):
             try:
                 await asyncio.wait_for(task, timeout=5.0)
             except asyncio.TimeoutError:
@@ -92,3 +103,4 @@ app.include_router(filters_routes.router)
 app.include_router(watcher_routes.router)
 app.include_router(scrapers_routes.router)
 app.include_router(matcher_routes.router)
+app.include_router(decisions_routes.router)

@@ -245,9 +245,32 @@ class PinnacleScraper(BookmakerScraper):
     def _prices_to_outcomes(
         self, prices: list[dict], info: _MatchupInfo
     ) -> list[tuple[str, float]]:
+        # Prefer Pinnacle's `designation` field (home|away|draw) when present
+        # — soccer markets always carry it and it's the only way to know the
+        # draw odd, since the draw isn't a participant.
         out: list[tuple[str, float]] = []
-        # Pinnacle prices arrive in participant order: Home, [Draw], Away
-        # Some 2-way (basketball/MMA/tennis) only have 2 entries
+        has_designation = any("designation" in p for p in prices)
+        if has_designation:
+            for p in prices:
+                des = (p.get("designation") or "").lower()
+                raw = p.get("price")
+                if raw is None:
+                    continue
+                if des == "home":
+                    label = info.home
+                elif des == "away":
+                    label = info.away
+                elif des == "draw":
+                    label = "Draw"
+                else:
+                    continue
+                try:
+                    dec = american_to_decimal(float(raw))
+                except (TypeError, ValueError):
+                    continue
+                out.append((label, dec))
+            return out
+        # Fallback: order-based (2-way sports where designation may be absent).
         order: list[str]
         if info.draw_allowed and len(prices) >= 3:
             order = [info.home, "Draw", info.away]

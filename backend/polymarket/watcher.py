@@ -98,6 +98,38 @@ class PolymarketWatcher:
     def stop(self) -> None:
         self._stop.set()
 
+    async def _persist_token_index(self, tokens: list[TokenSpec]) -> None:
+        """Upsert the current subscription set into polymarket_tokens so the
+        EV engine can look up `(event_id, outcome)` for any token_id without
+        going through this watcher's in-memory state."""
+        from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+        from backend.models import PolymarketToken
+
+        try:
+            async with self.session_factory() as session:
+                now = datetime.now(UTC)
+                for t in tokens:
+                    stmt = sqlite_insert(PolymarketToken).values(
+                        token_id=t.token_id,
+                        polymarket_event_id=t.event_id,
+                        market_condition_id=t.market_condition_id,
+                        outcome=t.outcome,
+                    )
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=[PolymarketToken.token_id],
+                        set_={
+                            "polymarket_event_id": t.event_id,
+                            "market_condition_id": t.market_condition_id,
+                            "outcome": t.outcome,
+                            "updated_at": now,
+                        },
+                    )
+                    await session.execute(stmt)
+                await session.commit()
+        except Exception:
+            logger.exception("Failed to persist token index")
+
     async def run(self) -> None:
         attempts = 0
         while not self._stop.is_set():
@@ -128,6 +160,8 @@ class PolymarketWatcher:
         self.stats.subscribed_tokens = len(plan.tokens)
         self.stats.subscribed_events = plan.event_count
         self.stats.subscription_truncated = plan.truncated
+        if plan.tokens:
+            await self._persist_token_index(plan.tokens)
 
         if not plan.tokens:
             logger.info("Watcher idle — no filters selected")
