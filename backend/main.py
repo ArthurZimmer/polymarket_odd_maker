@@ -93,9 +93,18 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="poly-scraper", version="0.1.0", lifespan=lifespan)
 
+_frontend_origins = list(
+    {
+        settings.frontend_origin,
+        # localhost ↔ 127.0.0.1 are different origins to the browser; cover both.
+        settings.frontend_origin.replace("localhost", "127.0.0.1"),
+        settings.frontend_origin.replace("127.0.0.1", "localhost"),
+    }
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.frontend_origin],
+    allow_origins=_frontend_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
