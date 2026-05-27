@@ -79,6 +79,11 @@ class ScraperStats:
     total_snapshots_published: int = 0
     snapshots_last_run: int = 0
     last_latency_ms: float | None = None
+    # Anti-bot (Etapa 13): per-scraper proxy + block telemetry.
+    last_proxy: str | None = None
+    last_blocked_at: datetime | None = None
+    block_count: int = 0
+    network_errors: int = 0
     _recent_run_ts: deque = field(default_factory=lambda: deque(maxlen=60))
 
     def runs_per_min(self) -> float:
@@ -100,6 +105,10 @@ class ScraperStats:
             "snapshots_last_run": self.snapshots_last_run,
             "last_latency_ms": self.last_latency_ms,
             "runs_per_min": self.runs_per_min(),
+            "last_proxy": self.last_proxy,
+            "last_blocked_at": self.last_blocked_at.isoformat() if self.last_blocked_at else None,
+            "block_count": self.block_count,
+            "network_errors": self.network_errors,
         }
 
 

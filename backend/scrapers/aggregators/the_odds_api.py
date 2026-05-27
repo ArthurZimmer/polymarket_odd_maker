@@ -140,6 +140,8 @@ class TheOddsApiScraper(BookmakerScraper):
         return total
 
     def _fetch_sport_sync(self, sport_key: str, canonical: str) -> list[_ParsedEvent]:
+        from backend.scrapers.proxies import proxied_get_sync
+
         url = (
             f"{API_BASE}/sports/{sport_key}/odds"
             f"?apiKey={self.api_key}"
@@ -148,7 +150,7 @@ class TheOddsApiScraper(BookmakerScraper):
             "&oddsFormat=decimal"
             "&dateFormat=iso"
         )
-        resp = self._session.get(url)
+        resp = proxied_get_sync(self._session, url, stats=self.stats)
         # Update quota from response headers (header names per API docs).
         try:
             self.quota_used = int(resp.headers.get("x-requests-used") or 0) or self.quota_used

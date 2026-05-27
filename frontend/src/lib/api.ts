@@ -175,6 +175,29 @@ export interface ScraperStatus {
   snapshots_last_run: number;
   last_latency_ms: number | null;
   runs_per_min: number;
+  last_proxy: string | null;
+  last_blocked_at: string | null;
+  block_count: number;
+  network_errors: number;
+}
+
+export interface ProxyEntry {
+  label: string;
+  consecutive_failures: number;
+  in_cooldown: boolean;
+  cooldown_until: string | null;
+  last_used_at: string | null;
+  success_count: number;
+  failure_count: number;
+}
+
+export interface ProxyPoolStats {
+  total: number;
+  active: number;
+  in_cooldown: number;
+  block_threshold: number;
+  cooldown_minutes: number;
+  proxies: ProxyEntry[];
 }
 
 export interface SportCoverage {

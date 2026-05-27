@@ -13,6 +13,7 @@ import {
   MatcherStatus,
   BotState,
   PositionManagerStatus,
+  ProxyPoolStats,
   RiskStatus,
   TradingStatus,
 } from "@/lib/api";
@@ -36,6 +37,7 @@ export function Nav({ subtitle }: { subtitle?: string }) {
   const pathname = usePathname();
   const [status, setStatus] = useState<WatcherStatus | null>(null);
   const [scrapers, setScrapers] = useState<ScraperStatus[] | null>(null);
+  const [proxyStats, setProxyStats] = useState<ProxyPoolStats | null>(null);
   const [matcher, setMatcher] = useState<MatcherStatus | null>(null);
   const [bot, setBot] = useState<BotState | null>(null);
   const [engines, setEngines] = useState<EnginesSnapshot>({
@@ -49,9 +51,10 @@ export function Nav({ subtitle }: { subtitle?: string }) {
     let alive = true;
     async function poll() {
       try {
-        const [w, s, m, b, dec, trd, pos, rsk] = await Promise.all([
+        const [w, s, prox, m, b, dec, trd, pos, rsk] = await Promise.all([
           apiFetch<WatcherStatus>("/api/watcher/status"),
           apiFetch<ScraperStatus[]>("/api/scrapers/status"),
+          apiFetch<ProxyPoolStats>("/api/scrapers/proxies").catch(() => null),
           apiFetch<MatcherStatus>("/api/matcher/status"),
           apiFetch<BotState>("/api/bot/state"),
           apiFetch<EngineStatus>("/api/decisions/status").catch(() => null),
@@ -62,6 +65,7 @@ export function Nav({ subtitle }: { subtitle?: string }) {
         if (!alive) return;
         setStatus(w);
         setScrapers(s);
+        setProxyStats(prox);
         setMatcher(m);
         setBot(b);
         setEngines({ decision: dec, trading: trd, position: pos, risk: rsk });
@@ -122,7 +126,7 @@ export function Nav({ subtitle }: { subtitle?: string }) {
       </div>
       <div className="flex items-center gap-3">
         <WatcherPill status={status} />
-        <ScrapersPill scrapers={scrapers} />
+        <ScrapersPill scrapers={scrapers} proxyStats={proxyStats} />
         <MatcherPill matcher={matcher} />
         <EnginesPill engines={engines} />
         <BotPill bot={bot} />
@@ -166,7 +170,13 @@ function WatcherPill({ status }: { status: WatcherStatus | null }) {
   );
 }
 
-function ScrapersPill({ scrapers }: { scrapers: ScraperStatus[] | null }) {
+function ScrapersPill({
+  scrapers,
+  proxyStats,
+}: {
+  scrapers: ScraperStatus[] | null;
+  proxyStats: ProxyPoolStats | null;
+}) {
   if (!scrapers) {
     return (
       <span className="rounded-full bg-zinc-100 px-3 py-1 text-xs text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
@@ -184,28 +194,47 @@ function ScrapersPill({ scrapers }: { scrapers: ScraperStatus[] | null }) {
   const ok = scrapers.filter((s) => s.health === "ok").length;
   const degraded = scrapers.filter((s) => s.health === "degraded").length;
   const offline = scrapers.filter((s) => s.health === "offline").length;
-  const dot =
-    offline > 0
-      ? "bg-red-500"
-      : degraded > 0
-        ? "bg-amber-500"
-        : "bg-emerald-500";
   const totalSnapshots = scrapers.reduce(
     (acc, s) => acc + s.total_snapshots_published,
     0,
   );
-  const title = scrapers
-    .map((s) => {
-      const last = s.last_success_at
-        ? new Date(s.last_success_at).toLocaleTimeString("pt-BR")
-        : "nunca";
-      const err = s.last_error ? `\n    erro: ${s.last_error}` : "";
-      return (
-        `${s.name} [${s.health}] · ${s.total_snapshots_published.toLocaleString("pt-BR")} snaps · ` +
-        `intervalo ${s.interval_s.toFixed(0)}s · última OK ${last}${err}`
-      );
-    })
-    .join("\n");
+  // Recent block = any scraper got a 429/403/etc in the last 5 minutes.
+  const now = Date.now();
+  const recentlyBlocked = scrapers.some(
+    (s) =>
+      s.last_blocked_at !== null &&
+      now - new Date(s.last_blocked_at).getTime() < 5 * 60_000,
+  );
+  const totalBlocks = scrapers.reduce((a, s) => a + s.block_count, 0);
+
+  const dot =
+    offline > 0
+      ? "bg-red-500"
+      : degraded > 0 || recentlyBlocked
+        ? "bg-amber-500"
+        : "bg-emerald-500";
+
+  const scrapersLines = scrapers.map((s) => {
+    const last = s.last_success_at
+      ? new Date(s.last_success_at).toLocaleTimeString("pt-BR")
+      : "nunca";
+    const proxy = s.last_proxy ? ` proxy=${s.last_proxy}` : "";
+    const blocks = s.block_count > 0 ? ` blocks=${s.block_count}` : "";
+    const err = s.last_error ? `\n    erro: ${s.last_error}` : "";
+    return (
+      `${s.name} [${s.health}] · ${s.total_snapshots_published.toLocaleString("pt-BR")} snaps · ` +
+      `intervalo ${s.interval_s.toFixed(0)}s · última OK ${last}${proxy}${blocks}${err}`
+    );
+  });
+  const proxyLine = proxyStats
+    ? proxyStats.total === 0
+      ? "Proxies: nenhum configurado (modo direto)"
+      : `Proxies: ${proxyStats.active}/${proxyStats.total} ativos, ` +
+        `${proxyStats.in_cooldown} em cooldown ` +
+        `(threshold ${proxyStats.block_threshold} falhas, ` +
+        `cooldown ${proxyStats.cooldown_minutes}min)`
+    : "";
+  const title = [proxyLine, ...scrapersLines].filter(Boolean).join("\n");
 
   return (
     <span
@@ -219,6 +248,16 @@ function ScrapersPill({ scrapers }: { scrapers: ScraperStatus[] | null }) {
       <span className="text-zinc-500">
         · {totalSnapshots.toLocaleString("pt-BR")} snaps
       </span>
+      {proxyStats && proxyStats.total > 0 && (
+        <span className="text-zinc-500">
+          · proxies {proxyStats.active}/{proxyStats.total}
+        </span>
+      )}
+      {totalBlocks > 0 && (
+        <span className="text-amber-600 dark:text-amber-300">
+          · {totalBlocks} block
+        </span>
+      )}
     </span>
   );
 }

@@ -290,8 +290,10 @@ class PinnacleScraper(BookmakerScraper):
         return out
 
     def _get_json(self, path: str) -> list[dict[str, Any]]:
+        from backend.scrapers.proxies import proxied_get_sync
+
         url = PINNACLE_API_BASE + path
-        resp = self._session.get(url)
+        resp = proxied_get_sync(self._session, url, stats=self.stats)
         if resp.status_code != 200:
             raise RuntimeError(
                 f"Pinnacle {path} -> HTTP {resp.status_code}: {resp.text[:200]}"

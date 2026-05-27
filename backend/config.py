@@ -33,6 +33,14 @@ class Settings(BaseSettings):
 
     the_odds_api_key: str | None = None
 
+    # Webshare datacenter proxies as a comma-separated list of
+    # `host:port:user:pass` (single line). Empty → scrapers run direct.
+    webshare_proxies: str | None = None
+    # Failures in a row before a proxy is parked in cooldown.
+    proxy_block_threshold: int = 3
+    # How long a burned proxy stays out of rotation.
+    proxy_cooldown_minutes: int = 10
+
     @property
     def db_path(self) -> Path:
         self.data_dir.mkdir(parents=True, exist_ok=True)
