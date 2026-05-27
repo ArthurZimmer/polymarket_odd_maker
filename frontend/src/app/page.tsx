@@ -8,6 +8,7 @@ import {
   DecisionRow,
   EngineStatus,
   getToken,
+  LivePnlRow,
   OrderRow,
   PositionCloseResult,
   PositionRow,
@@ -37,6 +38,7 @@ export default function Home() {
   const [engine, setEngine] = useState<EngineStatus | null>(null);
   const [rows, setRows] = useState<DecisionRow[]>([]);
   const [positions, setPositions] = useState<PositionRow[]>([]);
+  const [livePnl, setLivePnl] = useState<LivePnlRow[]>([]);
   const [orders, setOrders] = useState<OrderRow[]>([]);
   const [filter, setFilter] = useState<string>("ALL");
   const [error, setError] = useState<string | null>(null);
@@ -55,16 +57,18 @@ export default function Home() {
     async function poll() {
       try {
         const action = filter === "ALL" ? "" : `&action=${filter}`;
-        const [e, r, p, o] = await Promise.all([
+        const [e, r, p, l, o] = await Promise.all([
           apiFetch<EngineStatus>("/api/decisions/status"),
           apiFetch<DecisionRow[]>(`/api/decisions/recent?limit=${PAGE_SIZE}${action}`),
           apiFetch<PositionRow[]>("/api/positions/open"),
+          apiFetch<LivePnlRow[]>("/api/positions/live-pnl"),
           apiFetch<OrderRow[]>("/api/orders/recent?limit=20"),
         ]);
         if (!alive) return;
         setEngine(e);
         setRows(r);
         setPositions(p);
+        setLivePnl(l);
         setOrders(o);
         setError(null);
       } catch (e) {
@@ -96,7 +100,7 @@ export default function Home() {
       <Nav subtitle="Decision Feed" />
       <main className="flex-1 bg-zinc-50 px-6 py-6 dark:bg-zinc-950">
         <EngineSummary engine={engine} />
-        {positions.length > 0 && <PositionsTable positions={positions} />}
+        {positions.length > 0 && <PositionsTable positions={positions} livePnl={livePnl} />}
         {orders.length > 0 && <RecentOrdersTable orders={orders} />}
         <FilterBar filter={filter} setFilter={setFilter} engine={engine} />
         {error && (
@@ -318,9 +322,16 @@ function ActionPill({ action }: { action: string }) {
   );
 }
 
-function PositionsTable({ positions }: { positions: PositionRow[] }) {
+function PositionsTable({
+  positions,
+  livePnl,
+}: {
+  positions: PositionRow[];
+  livePnl: LivePnlRow[];
+}) {
   const [closing, setClosing] = useState<number | null>(null);
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  const liveById = new Map(livePnl.map((l) => [l.position_id, l]));
 
   async function closeOne(id: number) {
     if (!confirm("Fechar essa posição agora (SELL no melhor bid)?")) return;
@@ -339,11 +350,28 @@ function PositionsTable({ positions }: { positions: PositionRow[] }) {
     }
   }
 
+  const totalUnreal = livePnl.reduce(
+    (acc, l) => acc + (l.unrealized_pnl_usd ?? 0),
+    0,
+  );
+
   return (
     <div className="mb-5 rounded border border-emerald-200 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950">
-      <div className="border-b border-emerald-200 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:border-emerald-800 dark:text-emerald-200">
-        Posições abertas ({positions.length})
-        {errMsg && <span className="ml-3 normal-case text-red-600">erro: {errMsg}</span>}
+      <div className="flex items-center justify-between border-b border-emerald-200 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:border-emerald-800 dark:text-emerald-200">
+        <span>
+          Posições abertas ({positions.length})
+          {errMsg && <span className="ml-3 normal-case text-red-600">erro: {errMsg}</span>}
+        </span>
+        <span
+          className={
+            "normal-case font-mono " +
+            (totalUnreal >= 0
+              ? "text-emerald-700 dark:text-emerald-300"
+              : "text-red-600 dark:text-red-400")
+          }
+        >
+          PnL não-realizado: ${totalUnreal.toFixed(2)}
+        </span>
       </div>
       <table className="w-full text-left text-xs">
         <thead className="text-emerald-700/70 dark:text-emerald-300/70">
@@ -352,32 +380,63 @@ function PositionsTable({ positions }: { positions: PositionRow[] }) {
             <th className="px-3 py-1">Outcome</th>
             <th className="px-3 py-1 text-right">Size</th>
             <th className="px-3 py-1 text-right">Entry</th>
+            <th className="px-3 py-1 text-right">Bid</th>
+            <th className="px-3 py-1 text-right">PnL</th>
             <th className="px-3 py-1">PM event</th>
             <th className="px-3 py-1 text-right">Ação</th>
           </tr>
         </thead>
         <tbody>
-          {positions.map((p) => (
-            <tr key={p.id} className="border-t border-emerald-100 dark:border-emerald-900">
-              <td className="px-3 py-1 font-mono">
-                {new Date(p.entry_at).toLocaleTimeString("pt-BR")}
-              </td>
-              <td className="px-3 py-1">{p.outcome ?? "—"}</td>
-              <td className="px-3 py-1 text-right font-mono">{p.size.toFixed(2)}</td>
-              <td className="px-3 py-1 text-right font-mono">{p.entry_price.toFixed(4)}</td>
-              <td className="px-3 py-1 text-zinc-500">{p.polymarket_event_id}</td>
-              <td className="px-3 py-1 text-right">
-                <button
-                  onClick={() => closeOne(p.id)}
-                  disabled={closing === p.id || p.exit_order_id !== null}
-                  className="rounded border border-emerald-300 bg-white px-2 py-0.5 text-[10px] font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-40 dark:border-emerald-700 dark:bg-emerald-900 dark:text-emerald-200 dark:hover:bg-emerald-800"
-                  title={p.exit_order_id !== null ? "Já tem ordem de saída" : "Fechar agora"}
+          {positions.map((p) => {
+            const live = liveById.get(p.id);
+            return (
+              <tr key={p.id} className="border-t border-emerald-100 dark:border-emerald-900">
+                <td className="px-3 py-1 font-mono">
+                  {new Date(p.entry_at).toLocaleTimeString("pt-BR")}
+                </td>
+                <td className="px-3 py-1">{p.outcome ?? "—"}</td>
+                <td className="px-3 py-1 text-right font-mono">{p.size.toFixed(2)}</td>
+                <td className="px-3 py-1 text-right font-mono">{p.entry_price.toFixed(4)}</td>
+                <td className="px-3 py-1 text-right font-mono text-zinc-600 dark:text-zinc-300">
+                  {live?.current_bid !== undefined && live?.current_bid !== null
+                    ? live.current_bid.toFixed(4)
+                    : "—"}
+                </td>
+                <td
+                  className={
+                    "px-3 py-1 text-right font-mono " +
+                    (live?.unrealized_pnl_usd === undefined || live?.unrealized_pnl_usd === null
+                      ? "text-zinc-500"
+                      : live.unrealized_pnl_usd > 0
+                        ? "text-emerald-700 dark:text-emerald-300"
+                        : live.unrealized_pnl_usd < 0
+                          ? "text-red-600 dark:text-red-400"
+                          : "text-zinc-700 dark:text-zinc-300")
+                  }
+                  title={
+                    live?.unrealized_pct !== undefined && live?.unrealized_pct !== null
+                      ? `${live.unrealized_pct.toFixed(2)}%`
+                      : undefined
+                  }
                 >
-                  {closing === p.id ? "..." : p.exit_order_id !== null ? "saindo" : "Fechar"}
-                </button>
-              </td>
-            </tr>
-          ))}
+                  {live?.unrealized_pnl_usd !== undefined && live?.unrealized_pnl_usd !== null
+                    ? `$${live.unrealized_pnl_usd.toFixed(2)}`
+                    : "—"}
+                </td>
+                <td className="px-3 py-1 text-zinc-500">{p.polymarket_event_id}</td>
+                <td className="px-3 py-1 text-right">
+                  <button
+                    onClick={() => closeOne(p.id)}
+                    disabled={closing === p.id || p.exit_order_id !== null}
+                    className="rounded border border-emerald-300 bg-white px-2 py-0.5 text-[10px] font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-40 dark:border-emerald-700 dark:bg-emerald-900 dark:text-emerald-200 dark:hover:bg-emerald-800"
+                    title={p.exit_order_id !== null ? "Já tem ordem de saída" : "Fechar agora"}
+                  >
+                    {closing === p.id ? "..." : p.exit_order_id !== null ? "saindo" : "Fechar"}
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

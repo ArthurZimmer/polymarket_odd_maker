@@ -6,18 +6,30 @@ import { useRouter, usePathname } from "next/navigation";
 import {
   apiFetch,
   ApiError,
+  EngineStatus,
   setToken,
   WatcherStatus,
   ScraperStatus,
   MatcherStatus,
   BotState,
+  PositionManagerStatus,
+  RiskStatus,
+  TradingStatus,
 } from "@/lib/api";
 
 const links: Array<{ href: string; label: string }> = [
+  { href: "/history", label: "History" },
   { href: "/config/wallet", label: "Wallet" },
   { href: "/config/markets", label: "Filtros" },
   { href: "/config/risk", label: "Risk" },
 ];
+
+interface EnginesSnapshot {
+  decision: EngineStatus | null;
+  trading: TradingStatus | null;
+  position: PositionManagerStatus | null;
+  risk: RiskStatus | null;
+}
 
 export function Nav({ subtitle }: { subtitle?: string }) {
   const router = useRouter();
@@ -26,22 +38,33 @@ export function Nav({ subtitle }: { subtitle?: string }) {
   const [scrapers, setScrapers] = useState<ScraperStatus[] | null>(null);
   const [matcher, setMatcher] = useState<MatcherStatus | null>(null);
   const [bot, setBot] = useState<BotState | null>(null);
+  const [engines, setEngines] = useState<EnginesSnapshot>({
+    decision: null,
+    trading: null,
+    position: null,
+    risk: null,
+  });
 
   useEffect(() => {
     let alive = true;
     async function poll() {
       try {
-        const [w, s, m, b] = await Promise.all([
+        const [w, s, m, b, dec, trd, pos, rsk] = await Promise.all([
           apiFetch<WatcherStatus>("/api/watcher/status"),
           apiFetch<ScraperStatus[]>("/api/scrapers/status"),
           apiFetch<MatcherStatus>("/api/matcher/status"),
           apiFetch<BotState>("/api/bot/state"),
+          apiFetch<EngineStatus>("/api/decisions/status").catch(() => null),
+          apiFetch<TradingStatus>("/api/bot/trading-status").catch(() => null),
+          apiFetch<PositionManagerStatus>("/api/positions/manager-status").catch(() => null),
+          apiFetch<RiskStatus>("/api/risk/status").catch(() => null),
         ]);
         if (!alive) return;
         setStatus(w);
         setScrapers(s);
         setMatcher(m);
         setBot(b);
+        setEngines({ decision: dec, trading: trd, position: pos, risk: rsk });
       } catch (e) {
         if (e instanceof ApiError && e.status === 401) {
           // logged out — let other pages handle the redirect
@@ -101,6 +124,7 @@ export function Nav({ subtitle }: { subtitle?: string }) {
         <WatcherPill status={status} />
         <ScrapersPill scrapers={scrapers} />
         <MatcherPill matcher={matcher} />
+        <EnginesPill engines={engines} />
         <BotPill bot={bot} />
         <button
           onClick={onLogout}
@@ -295,6 +319,82 @@ function BotPill({ bot }: { bot: BotState | null }) {
       <span className={`inline-block h-2 w-2 rounded-full ${dot}`} />
       <span className="font-medium">{label}</span>
       <span className="text-zinc-500">· ${bot.master_stake_usd.toFixed(0)}</span>
+    </span>
+  );
+}
+
+function EnginesPill({ engines }: { engines: EnginesSnapshot }) {
+  const { decision, trading, position, risk } = engines;
+  const STALE_MS = 90_000;
+
+  function fresh(iso: string | null | undefined): boolean {
+    if (!iso) return false;
+    return Date.now() - new Date(iso).getTime() < STALE_MS;
+  }
+
+  const decisionOk = fresh(decision?.last_run_at);
+  const tradingOk = fresh(trading?.stats?.last_run_at);
+  const positionOk = fresh(position?.stats?.last_run_at);
+  const riskOk = fresh(risk?.monitor?.last_run_at);
+  const riskHealthy = risk?.report?.passed !== false;
+
+  const all = [decisionOk, tradingOk, positionOk, riskOk];
+  const allOk = all.every(Boolean) && riskHealthy;
+  const anyOk = all.some(Boolean);
+
+  const dot = !riskHealthy
+    ? "bg-red-500"
+    : allOk
+      ? "bg-emerald-500"
+      : anyOk
+        ? "bg-amber-500"
+        : "bg-zinc-400";
+  const cls = !riskHealthy
+    ? "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-200"
+    : allOk
+      ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200"
+      : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300";
+
+  function line(name: string, ok: boolean, extra?: string): string {
+    return `${ok ? "✓" : "✗"} ${name}${extra ? " — " + extra : ""}`;
+  }
+  const tooltip =
+    "Engines (último ciclo < 90s):\n" +
+    line(
+      "decision",
+      decisionOk,
+      decision?.last_run_at ? new Date(decision.last_run_at).toLocaleTimeString("pt-BR") : "sem dado",
+    ) +
+    "\n" +
+    line(
+      "trading",
+      tradingOk,
+      trading?.stats?.last_run_at ? new Date(trading.stats.last_run_at).toLocaleTimeString("pt-BR") : "sem dado",
+    ) +
+    "\n" +
+    line(
+      "positions",
+      positionOk,
+      position?.stats?.last_open_positions !== undefined
+        ? `${position.stats.last_open_positions} abertas`
+        : "sem dado",
+    ) +
+    "\n" +
+    line(
+      "risk",
+      riskOk && riskHealthy,
+      risk?.report?.violations.length
+        ? risk.report.violations.map((v) => v.code).join(",")
+        : "ok",
+    );
+
+  return (
+    <span
+      className={"flex items-center gap-2 rounded-full px-3 py-1 text-xs " + cls}
+      title={tooltip}
+    >
+      <span className={`inline-block h-2 w-2 rounded-full ${dot}`} />
+      <span className="font-medium">Engines</span>
     </span>
   );
 }

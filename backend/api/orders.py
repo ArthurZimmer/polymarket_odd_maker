@@ -3,13 +3,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
-from sqlalchemy import desc, select
+from sqlalchemy import and_, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.auth import require_auth
 from backend.db import get_session
 from backend.engine.position_manager import manual_close_position
-from backend.models import Order, Position
+from backend.models import OddsSnapshot, Order, Position
 
 router = APIRouter(prefix="/api", tags=["orders"])
 
@@ -166,3 +166,75 @@ async def position_manager_status(
     if mgr is None:
         return {"running": False, "stats": None}
     return {"running": True, "stats": mgr.stats.to_dict()}
+
+
+class LivePnlRow(BaseModel):
+    position_id: int
+    token_id: str
+    current_bid: float | None
+    current_ask: float | None
+    captured_at: str | None
+    unrealized_pnl_usd: float | None
+    unrealized_pct: float | None
+
+
+@router.get("/positions/live-pnl", response_model=list[LivePnlRow])
+async def live_pnl(
+    _user: str = Depends(require_auth),
+    session: AsyncSession = Depends(get_session),
+) -> list[LivePnlRow]:
+    """Per OPEN position, fetch the latest polymarket snapshot for its token
+    and compute unrealized PnL using the bid (which is what we'd realize
+    selling now).
+    """
+    positions = (
+        await session.execute(
+            select(Position).where(Position.status == "OPEN")
+        )
+    ).scalars().all()
+    out: list[LivePnlRow] = []
+    for p in positions:
+        snap = (
+            await session.execute(
+                select(OddsSnapshot)
+                .where(
+                    and_(
+                        OddsSnapshot.source == "polymarket",
+                        OddsSnapshot.token_id == p.token_id,
+                    )
+                )
+                .order_by(desc(OddsSnapshot.captured_at))
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if snap is None:
+            out.append(
+                LivePnlRow(
+                    position_id=p.id,
+                    token_id=p.token_id,
+                    current_bid=None,
+                    current_ask=None,
+                    captured_at=None,
+                    unrealized_pnl_usd=None,
+                    unrealized_pct=None,
+                )
+            )
+            continue
+        bid = snap.best_bid
+        unreal = None
+        unreal_pct = None
+        if bid is not None and p.entry_price > 0:
+            unreal = round((bid - p.entry_price) * p.size, 4)
+            unreal_pct = round((bid - p.entry_price) / p.entry_price * 100.0, 2)
+        out.append(
+            LivePnlRow(
+                position_id=p.id,
+                token_id=p.token_id,
+                current_bid=bid,
+                current_ask=snap.best_ask,
+                captured_at=snap.captured_at.isoformat() if snap.captured_at else None,
+                unrealized_pnl_usd=unreal,
+                unrealized_pct=unreal_pct,
+            )
+        )
+    return out

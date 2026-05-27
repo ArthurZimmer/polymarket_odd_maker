@@ -47,6 +47,33 @@ export async function apiFetch<T = unknown>(
   return data as T;
 }
 
+/**
+ * Fetches an authed blob and triggers a browser download with the given
+ * filename. Used for CSV exports — we can't put the JWT in a plain <a href>
+ * since the bearer token is in localStorage, not a cookie.
+ */
+export async function apiDownload(path: string, fallbackFilename: string) {
+  const token = getToken();
+  const headers = new Headers();
+  if (token) headers.set("Authorization", `Bearer ${token}`);
+  const res = await fetch(`${API_BASE}${path}`, { headers });
+  if (!res.ok) {
+    throw new ApiError(res.status, res.statusText);
+  }
+  const blob = await res.blob();
+  const cd = res.headers.get("Content-Disposition") ?? "";
+  const m = cd.match(/filename="?([^";]+)"?/i);
+  const filename = m ? m[1] : fallbackFilename;
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
 // ── Types ──────────────────────────────────────────────────────────
 export interface AuthState {
   setup_required: boolean;
@@ -272,6 +299,58 @@ export interface RiskMonitorStats {
 export interface RiskStatus {
   report: RiskReport | null;
   monitor: RiskMonitorStats | null;
+}
+
+export interface HistoryPositionRow {
+  id: number;
+  polymarket_event_id: string | null;
+  sport: string | null;
+  league: string | null;
+  pm_event_title: string | null;
+  outcome: string | null;
+  outcome_side: string | null;
+  size: number;
+  entry_price: number;
+  entry_at: string;
+  exit_price: number | null;
+  exit_at: string | null;
+  pnl_usd: number | null;
+  status: "OPEN" | "CLOSED";
+  ev_entry: number | null;
+  fair_prob_entry: number | null;
+}
+
+export interface PnlDailyPoint {
+  date: string;
+  pnl_usd: number;
+  trades: number;
+  wins: number;
+  losses: number;
+  cumulative_pnl_usd: number;
+}
+
+export interface HistorySummary {
+  total_positions: number;
+  open_positions: number;
+  closed_positions: number;
+  total_pnl_usd: number;
+  realized_pnl_today_usd: number;
+  realized_pnl_7d_usd: number;
+  realized_pnl_30d_usd: number;
+  win_rate_pct: number | null;
+  avg_pnl_usd: number | null;
+  best_position_pnl_usd: number | null;
+  worst_position_pnl_usd: number | null;
+}
+
+export interface LivePnlRow {
+  position_id: number;
+  token_id: string;
+  current_bid: number | null;
+  current_ask: number | null;
+  captured_at: string | null;
+  unrealized_pnl_usd: number | null;
+  unrealized_pct: number | null;
 }
 
 export interface TradingStats {

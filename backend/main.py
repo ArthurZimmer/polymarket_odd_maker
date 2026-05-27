@@ -21,6 +21,7 @@ from backend.api import auth as auth_routes
 from backend.api import bot as bot_routes
 from backend.api import decisions as decisions_routes
 from backend.api import filters as filters_routes
+from backend.api import history as history_routes
 from backend.api import matcher as matcher_routes
 from backend.api import orders as orders_routes
 from backend.api import risk as risk_routes
@@ -141,3 +142,4 @@ app.include_router(decisions_routes.router)
 app.include_router(bot_routes.router)
 app.include_router(orders_routes.router)
 app.include_router(risk_routes.router)
+app.include_router(history_routes.router)
