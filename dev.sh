@@ -10,6 +10,9 @@ if [[ -d .venv ]]; then
   source .venv/bin/activate
 fi
 
+# Permite trocar a porta do frontend sem editar o script novamente.
+FRONTEND_PORT="${FRONTEND_PORT:-3001}"
+
 uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000 &
 BACKEND_PID=$!
 
@@ -21,4 +24,4 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
-(cd frontend && npm run dev)
+(cd frontend && npm run dev -- --port "$FRONTEND_PORT")

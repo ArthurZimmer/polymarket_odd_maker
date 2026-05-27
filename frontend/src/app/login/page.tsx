@@ -12,10 +12,18 @@ export default function LoginPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  async function loadAuthState() {
+    try {
+      const data = await apiFetch<AuthState>("/api/auth/state");
+      setState(data);
+      setError(null);
+    } catch (e) {
+      setError(`Não foi possível conectar ao backend: ${e instanceof Error ? e.message : "erro desconhecido"}`);
+    }
+  }
+
   useEffect(() => {
-    apiFetch<AuthState>("/api/auth/state")
-      .then(setState)
-      .catch((e) => setError(`Não foi possível conectar ao backend: ${e.message}`));
+    loadAuthState();
   }, []);
 
   async function onSubmit(e: React.FormEvent) {
@@ -50,7 +58,20 @@ export default function LoginPage() {
   if (!state) {
     return (
       <main className="flex flex-1 items-center justify-center">
-        <p className="text-zinc-500">Carregando…</p>
+        {error ? (
+          <div className="flex max-w-md flex-col items-center gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-center dark:border-red-900 dark:bg-red-950/40">
+            <p className="text-sm text-red-700 dark:text-red-300">{error}</p>
+            <button
+              type="button"
+              onClick={loadAuthState}
+              className="rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white transition hover:bg-zinc-800 dark:bg-zinc-50 dark:text-zinc-900 dark:hover:bg-zinc-200"
+            >
+              Tentar novamente
+            </button>
+          </div>
+        ) : (
+          <p className="text-zinc-500">Carregando…</p>
+        )}
       </main>
     );
   }

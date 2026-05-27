@@ -115,6 +115,11 @@ _frontend_origins = list(
         # localhost ↔ 127.0.0.1 are different origins to the browser; cover both.
         settings.frontend_origin.replace("localhost", "127.0.0.1"),
         settings.frontend_origin.replace("127.0.0.1", "localhost"),
+        # Common local dev ports for Next.js.
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
     }
 )
 
