@@ -58,6 +58,18 @@ DEFAULT_MASTER_STAKE_USD = 10.0
 SNAPSHOT_MAX_AGE_S = 90.0           # poly/ext snapshot can't be older than this (not user-tunable)
 RUN_INTERVAL_S = 10.0               # how often the engine cycles
 
+# Actions that don't carry analytical signal and would dwarf the table at
+# ~4M rows/day. We still *count* them in the stats; just skip writing them
+# to `decision_log`. The actions we DO persist are: BUY, PASS_LOW_EV,
+# PASS_LIQUIDITY, PASS_DEVIG_FAILED, PASS_FAIR_BOUNDS, PASS_NO_POLY_SNAP,
+# PASS_NO_EXT_SNAP, ERROR — these tell us *why* an opportunity failed
+# (vs "no opportunity to begin with").
+_NOISY_PASS_ACTIONS: frozenset[str] = frozenset({
+    "PASS_WINDOW_EARLY",   # event >2h from kickoff — always-on
+    "PASS_WINDOW_LATE",    # event <5min — about to be live
+    "PASS_NO_MAP",         # PM outcome string doesn't match any side
+})
+
 
 @dataclass(slots=True)
 class _RuntimeKnobs:
@@ -576,6 +588,10 @@ class DecisionEngine:
         proposed_price: float | None = None,
         proposed_stake_usd: float | None = None,
     ) -> None:
+        # Skip noisy passes — they dwarf the table without analytical value.
+        # They still show up in the cycle stats (last_passes_by_reason).
+        if action in _NOISY_PASS_ACTIONS:
+            return
         session.add(
             DecisionLog(
                 polymarket_event_id=match.polymarket_event_id,

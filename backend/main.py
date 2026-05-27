@@ -33,6 +33,7 @@ from backend.db import SessionLocal
 from backend.engine.decision import DecisionEngine
 from backend.engine.odds_bus import OddsBus
 from backend.engine.position_manager import PositionManager
+from backend.engine.retention import RetentionMonitor
 from backend.engine.risk_monitor import RiskMonitor
 from backend.engine.trading import TradingEngine
 from backend.matcher.matcher import EventMatcher
@@ -59,6 +60,7 @@ async def lifespan(app: FastAPI):
     trading_engine = TradingEngine(session_factory=SessionLocal)
     position_manager = PositionManager(session_factory=SessionLocal)
     risk_monitor = RiskMonitor(session_factory=SessionLocal)
+    retention_monitor = RetentionMonitor(session_factory=SessionLocal)
     app.state.bus = bus
     app.state.watcher = watcher
     app.state.scrapers = coordinator
@@ -67,6 +69,7 @@ async def lifespan(app: FastAPI):
     app.state.trading_engine = trading_engine
     app.state.position_manager = position_manager
     app.state.risk_monitor = risk_monitor
+    app.state.retention_monitor = retention_monitor
     watcher_task = asyncio.create_task(watcher.run(), name="polymarket-watcher")
     matcher_task = asyncio.create_task(matcher.run(), name="event-matcher")
     decision_task = asyncio.create_task(decision_engine.run(), name="decision-engine")
@@ -75,6 +78,7 @@ async def lifespan(app: FastAPI):
         position_manager.run(), name="position-manager"
     )
     risk_task = asyncio.create_task(risk_monitor.run(), name="risk-monitor")
+    retention_task = asyncio.create_task(retention_monitor.run(), name="retention-monitor")
     coordinator.start()
 
     try:
@@ -85,6 +89,7 @@ async def lifespan(app: FastAPI):
         trading_engine.stop()
         position_manager.stop()
         risk_monitor.stop()
+        retention_monitor.stop()
         watcher.stop()
         matcher.stop()
         decision_engine.stop()
@@ -93,6 +98,7 @@ async def lifespan(app: FastAPI):
             ("trading", trading_task),
             ("position-manager", position_task),
             ("risk-monitor", risk_task),
+            ("retention-monitor", retention_task),
             ("watcher", watcher_task),
             ("matcher", matcher_task),
             ("decision", decision_task),

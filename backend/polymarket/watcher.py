@@ -94,6 +94,11 @@ class PolymarketWatcher:
         self.stats = WatcherStats()
         self._stop = asyncio.Event()
         self._token_index: dict[str, TokenSpec] = {}
+        # Persist only when bid/ask actually move — keeps the
+        # `odds_snapshots` table from ballooning at ~600 rows/min while
+        # most messages are duplicates. Bus still gets every snapshot
+        # (in-memory, no cost).
+        self._last_persisted: dict[str, tuple[float | None, float | None]] = {}
 
     def stop(self) -> None:
         self._stop.set()
@@ -303,7 +308,15 @@ class PolymarketWatcher:
 
     async def _emit(self, snap: OddsSnapshot) -> None:
         await self.bus.publish(snap)
-        # Persist (best-effort; failures are logged but don't crash the loop)
+        # Skip the DB write when the bid/ask hasn't moved — duplicates would
+        # blow up `odds_snapshots` with no analytical value (the same
+        # token reports an unchanged book multiple times per second).
+        if snap.token_id:
+            last = self._last_persisted.get(snap.token_id)
+            current = (snap.best_bid, snap.best_ask)
+            if last == current:
+                return
+            self._last_persisted[snap.token_id] = current
         try:
             async with self.session_factory() as session:
                 session.add(
