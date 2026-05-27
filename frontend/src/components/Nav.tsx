@@ -256,31 +256,40 @@ function BotPill({ bot }: { bot: BotState | null }) {
       </span>
     );
   }
+  const paused = !!bot.last_pause_reason && !bot.is_running;
   const live = bot.is_running && bot.vault_unlocked;
-  const dot = live
-    ? "bg-emerald-500"
-    : bot.is_running
-      ? "bg-amber-500"
-      : "bg-zinc-400";
-  const label = live
-    ? "LIVE"
-    : bot.is_running
-      ? "ON · vault locked"
-      : "OFF";
-  const title =
+  const dot = paused
+    ? "bg-red-500"
+    : live
+      ? "bg-emerald-500"
+      : bot.is_running
+        ? "bg-amber-500"
+        : "bg-zinc-400";
+  const label = paused
+    ? "PAUSED"
+    : live
+      ? "LIVE"
+      : bot.is_running
+        ? "ON · vault locked"
+        : "OFF";
+  const baseTitle =
     `Bot ${label}\n` +
     `Stake: $${bot.master_stake_usd.toFixed(2)} · EV≥${(bot.ev_threshold * 100).toFixed(1)}%\n` +
     `Window: ${bot.min_time_to_game_minutes}–${bot.max_time_to_game_minutes}min · ` +
     `max ${bot.max_concurrent_positions} concorrentes\n` +
-    `Drawdown lim: $${bot.max_daily_drawdown_usd.toFixed(0)}`;
+    `Drawdown lim: $${bot.max_daily_drawdown_usd.toFixed(0)} · ` +
+    `Exposição máx: $${bot.max_total_exposure_usd.toFixed(0)}`;
+  const title = paused
+    ? `${baseTitle}\n\n⚠ Pausado: ${bot.last_pause_reason}`
+    : baseTitle;
+  const cls = paused
+    ? "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-200"
+    : live
+      ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200"
+      : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300";
   return (
     <span
-      className={
-        "flex items-center gap-2 rounded-full px-3 py-1 text-xs " +
-        (live
-          ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-200"
-          : "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300")
-      }
+      className={"flex items-center gap-2 rounded-full px-3 py-1 text-xs " + cls}
       title={title}
     >
       <span className={`inline-block h-2 w-2 rounded-full ${dot}`} />

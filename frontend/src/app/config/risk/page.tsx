@@ -107,6 +107,23 @@ export default function RiskConfigPage() {
     <>
       <Nav subtitle="Risk & Bot Control" />
       <main className="flex-1 bg-zinc-50 px-6 py-6 dark:bg-zinc-950">
+        {state.last_pause_reason && !state.is_running && (
+          <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-4 text-sm text-red-800 dark:border-red-700 dark:bg-red-950 dark:text-red-200">
+            <div className="font-semibold uppercase tracking-wide">
+              Bot pausado pelo Risk Manager
+            </div>
+            <div className="mt-1 font-mono text-xs">{state.last_pause_reason}</div>
+            {state.last_paused_at && (
+              <div className="mt-1 text-xs text-red-700/80 dark:text-red-300/80">
+                desde {new Date(state.last_paused_at).toLocaleString("pt-BR")}
+              </div>
+            )}
+            <div className="mt-2 text-xs">
+              Revise os parâmetros, então clique em <strong>Ligar bot</strong> para
+              limpar o alerta.
+            </div>
+          </div>
+        )}
         <section className="mb-6 rounded-lg border border-zinc-200 bg-white p-5 dark:border-zinc-800 dark:bg-zinc-900">
           <div className="flex items-center justify-between gap-4">
             <div>
@@ -182,6 +199,14 @@ export default function RiskConfigPage() {
               max={100000}
               value={draft.max_daily_drawdown_usd!}
               onChange={(v) => setDraft({ ...draft, max_daily_drawdown_usd: v })}
+            />
+            <NumberInput
+              label="Exposição agregada máxima (USD)"
+              step={10}
+              min={1}
+              max={1000000}
+              value={draft.max_total_exposure_usd!}
+              onChange={(v) => setDraft({ ...draft, max_total_exposure_usd: v })}
             />
             <NumberInput
               label="Janela mínima até kickoff (min)"
@@ -264,6 +289,7 @@ function toDraft(s: BotState): BotStatePatch {
     stop_loss_pct: s.stop_loss_pct,
     max_concurrent_positions: s.max_concurrent_positions,
     max_daily_drawdown_usd: s.max_daily_drawdown_usd,
+    max_total_exposure_usd: s.max_total_exposure_usd,
     min_time_to_game_minutes: s.min_time_to_game_minutes,
     max_time_to_game_minutes: s.max_time_to_game_minutes,
     min_ask_depth_usd: s.min_ask_depth_usd,

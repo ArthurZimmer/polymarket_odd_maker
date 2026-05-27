@@ -23,6 +23,7 @@ from backend.api import decisions as decisions_routes
 from backend.api import filters as filters_routes
 from backend.api import matcher as matcher_routes
 from backend.api import orders as orders_routes
+from backend.api import risk as risk_routes
 from backend.api import scrapers as scrapers_routes
 from backend.api import wallet as wallet_routes
 from backend.api import watcher as watcher_routes
@@ -31,6 +32,7 @@ from backend.db import SessionLocal
 from backend.engine.decision import DecisionEngine
 from backend.engine.odds_bus import OddsBus
 from backend.engine.position_manager import PositionManager
+from backend.engine.risk_monitor import RiskMonitor
 from backend.engine.trading import TradingEngine
 from backend.matcher.matcher import EventMatcher
 from backend.polymarket.watcher import PolymarketWatcher
@@ -55,6 +57,7 @@ async def lifespan(app: FastAPI):
     decision_engine = DecisionEngine(session_factory=SessionLocal, dry_run=True)
     trading_engine = TradingEngine(session_factory=SessionLocal)
     position_manager = PositionManager(session_factory=SessionLocal)
+    risk_monitor = RiskMonitor(session_factory=SessionLocal)
     app.state.bus = bus
     app.state.watcher = watcher
     app.state.scrapers = coordinator
@@ -62,6 +65,7 @@ async def lifespan(app: FastAPI):
     app.state.decision_engine = decision_engine
     app.state.trading_engine = trading_engine
     app.state.position_manager = position_manager
+    app.state.risk_monitor = risk_monitor
     watcher_task = asyncio.create_task(watcher.run(), name="polymarket-watcher")
     matcher_task = asyncio.create_task(matcher.run(), name="event-matcher")
     decision_task = asyncio.create_task(decision_engine.run(), name="decision-engine")
@@ -69,6 +73,7 @@ async def lifespan(app: FastAPI):
     position_task = asyncio.create_task(
         position_manager.run(), name="position-manager"
     )
+    risk_task = asyncio.create_task(risk_monitor.run(), name="risk-monitor")
     coordinator.start()
 
     try:
@@ -78,6 +83,7 @@ async def lifespan(app: FastAPI):
         # Trading first — it tries to cancel live orders before letting go.
         trading_engine.stop()
         position_manager.stop()
+        risk_monitor.stop()
         watcher.stop()
         matcher.stop()
         decision_engine.stop()
@@ -85,6 +91,7 @@ async def lifespan(app: FastAPI):
         for name, task in (
             ("trading", trading_task),
             ("position-manager", position_task),
+            ("risk-monitor", risk_task),
             ("watcher", watcher_task),
             ("matcher", matcher_task),
             ("decision", decision_task),
@@ -133,3 +140,4 @@ app.include_router(matcher_routes.router)
 app.include_router(decisions_routes.router)
 app.include_router(bot_routes.router)
 app.include_router(orders_routes.router)
+app.include_router(risk_routes.router)

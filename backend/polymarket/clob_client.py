@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType
+from py_clob_client.clob_types import ApiCreds, AssetType, BalanceAllowanceParams, OrderArgs, OrderType
 from py_clob_client.constants import POLYGON
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -200,6 +200,67 @@ async def get_order(session: AsyncSession, order_id: str) -> dict[str, Any] | No
     except Exception:
         logger.exception("Polymarket get_order failed: %s", order_id)
         return None
+
+
+# In-memory cache for USDC balance reads — Polymarket RPC is slow enough
+# that hitting it every TradingEngine cycle (5s) is wasteful. Refresh every
+# BALANCE_CACHE_TTL_S seconds at most.
+_BALANCE_CACHE: dict[str, Any] = {"value": None, "fetched_at": 0.0}
+BALANCE_CACHE_TTL_S = 30.0
+
+
+async def get_usdc_balance(
+    session: AsyncSession, *, force_refresh: bool = False
+) -> float | None:
+    """Return on-chain USDC collateral balance for the configured wallet.
+
+    Returns None if vault is locked, wallet not configured, or the call
+    fails. Caller treats None as "skip stake check, but other risk gates
+    still apply." Result is cached in memory for BALANCE_CACHE_TTL_S to
+    avoid spamming the Polymarket API every trading cycle.
+    """
+    import asyncio
+    import time
+
+    now = time.time()
+    if (
+        not force_refresh
+        and _BALANCE_CACHE["value"] is not None
+        and now - _BALANCE_CACHE["fetched_at"] < BALANCE_CACHE_TTL_S
+    ):
+        return _BALANCE_CACHE["value"]
+
+    if not VaultState.is_unlocked():
+        return None
+    try:
+        creds = await load_wallet_credentials(session)
+    except (VaultLocked, WalletNotConfigured):
+        return None
+
+    def _do() -> dict[str, Any] | None:
+        client = _build_client(creds)
+        return client.get_balance_allowance(
+            BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+        )
+
+    try:
+        resp = await asyncio.to_thread(_do)
+    except Exception:
+        logger.exception("Polymarket get_balance_allowance failed")
+        return None
+    if not resp:
+        return None
+    # Polymarket returns balance as a string in USDC base units (1e6 = $1).
+    raw = resp.get("balance") if isinstance(resp, dict) else None
+    if raw is None:
+        return None
+    try:
+        balance_usd = float(raw) / 1_000_000.0
+    except (TypeError, ValueError):
+        return None
+    _BALANCE_CACHE["value"] = balance_usd
+    _BALANCE_CACHE["fetched_at"] = now
+    return balance_usd
 
 
 async def cancel_order(session: AsyncSession, order_id: str) -> bool:

@@ -27,9 +27,12 @@ class BotStateView(BaseModel):
     stop_loss_pct: float
     max_concurrent_positions: int
     max_daily_drawdown_usd: float
+    max_total_exposure_usd: float
     min_time_to_game_minutes: int
     max_time_to_game_minutes: int
     min_ask_depth_usd: float
+    last_pause_reason: str | None
+    last_paused_at: str | None
     vault_unlocked: bool
     updated_at: str
 
@@ -42,6 +45,7 @@ class BotStatePatch(BaseModel):
     stop_loss_pct: float | None = Field(None, ge=0.0, le=1.0)
     max_concurrent_positions: int | None = Field(None, ge=1, le=50)
     max_daily_drawdown_usd: float | None = Field(None, ge=1.0, le=100000.0)
+    max_total_exposure_usd: float | None = Field(None, ge=1.0, le=1000000.0)
     min_time_to_game_minutes: int | None = Field(None, ge=0, le=600)
     max_time_to_game_minutes: int | None = Field(None, ge=1, le=1440)
     min_ask_depth_usd: float | None = Field(None, ge=0.0, le=100000.0)
@@ -68,9 +72,12 @@ def _to_view(row: BotState) -> BotStateView:
         stop_loss_pct=row.stop_loss_pct,
         max_concurrent_positions=row.max_concurrent_positions,
         max_daily_drawdown_usd=row.max_daily_drawdown_usd,
+        max_total_exposure_usd=row.max_total_exposure_usd,
         min_time_to_game_minutes=row.min_time_to_game_minutes,
         max_time_to_game_minutes=row.max_time_to_game_minutes,
         min_ask_depth_usd=row.min_ask_depth_usd,
+        last_pause_reason=row.last_pause_reason,
+        last_paused_at=row.last_paused_at.isoformat() if row.last_paused_at else None,
         vault_unlocked=VaultState.is_unlocked(),
         updated_at=row.updated_at.isoformat() if row.updated_at else "",
     )
@@ -92,8 +99,14 @@ async def patch_state(
 ) -> BotStateView:
     row = await _get_or_create(session)
     data = payload.model_dump(exclude_unset=True)
+    was_running = row.is_running
     for k, v in data.items():
         setattr(row, k, v)
+    # User manually turning the bot back on after an auto-pause: clear the
+    # pause flag so the dashboard banner goes away.
+    if data.get("is_running") is True and not was_running:
+        row.last_pause_reason = None
+        row.last_paused_at = None
     await session.commit()
     await session.refresh(row)
     return _to_view(row)

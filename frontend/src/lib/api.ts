@@ -227,14 +227,52 @@ export interface BotState {
   stop_loss_pct: number;
   max_concurrent_positions: number;
   max_daily_drawdown_usd: number;
+  max_total_exposure_usd: number;
   min_time_to_game_minutes: number;
   max_time_to_game_minutes: number;
   min_ask_depth_usd: number;
+  last_pause_reason: string | null;
+  last_paused_at: string | null;
   vault_unlocked: boolean;
   updated_at: string;
 }
 
-export type BotStatePatch = Partial<Omit<BotState, "vault_unlocked" | "updated_at">>;
+export type BotStatePatch = Partial<
+  Omit<BotState, "vault_unlocked" | "updated_at" | "last_pause_reason" | "last_paused_at">
+>;
+
+export interface RiskViolation {
+  code: "CONCURRENT" | "DRAWDOWN" | "EXPOSURE" | "STAKE";
+  current: number;
+  limit: number;
+  message: string;
+}
+
+export interface RiskReport {
+  passed: boolean;
+  violations: RiskViolation[];
+  open_positions: number;
+  pending_orders: number;
+  concurrent_count: number;
+  open_exposure_usd: number;
+  realized_pnl_today_usd: number;
+  bankroll_usd: number | null;
+  intended_notional_usd: number;
+}
+
+export interface RiskMonitorStats {
+  last_run_at: string | null;
+  total_runs: number;
+  last_report: RiskReport | null;
+  last_pause_reason: string | null;
+  auto_pauses_total: number;
+  last_error: string | null;
+}
+
+export interface RiskStatus {
+  report: RiskReport | null;
+  monitor: RiskMonitorStats | null;
+}
 
 export interface TradingStats {
   last_run_at: string | null;

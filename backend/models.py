@@ -267,6 +267,11 @@ class BotState(Base):
     stop_loss_pct: Mapped[float] = mapped_column(
         Float, default=0.30, nullable=False
     )
+    max_total_exposure_usd: Mapped[float] = mapped_column(
+        Float, default=200.0, nullable=False
+    )
+    last_pause_reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    last_paused_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     min_time_to_game_minutes: Mapped[int] = mapped_column(
         Integer, default=5, nullable=False
     )

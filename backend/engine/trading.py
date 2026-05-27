@@ -31,8 +31,10 @@ from backend.polymarket.clob_client import (
     WalletNotConfigured,
     cancel_order,
     get_order,
+    get_usdc_balance,
     place_limit_order,
 )
+from backend.positions.risk import enforce_risk
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +136,13 @@ class TradingEngine:
                 await self._tick()
                 return
 
-            actions: dict[str, int] = {"placed": 0, "skipped_dup": 0, "skipped_concurrency": 0, "failed": 0}
+            actions: dict[str, int] = {
+                "placed": 0,
+                "skipped_dup": 0,
+                "skipped_concurrency": 0,
+                "skipped_risk": 0,
+                "failed": 0,
+            }
 
             # Concurrency gate: count current non-terminal orders.
             open_orders = (
@@ -165,6 +173,9 @@ class TradingEngine:
                 )
             ).scalars().all()
 
+            # Read bankroll once per cycle — cached for 30s upstream.
+            bankroll = await get_usdc_balance(session)
+
             for d in buys:
                 self._last_decision_id = d.id
                 if d.polymarket_token_id is None or d.proposed_price is None:
@@ -178,6 +189,30 @@ class TradingEngine:
                 if concurrent_count >= state.max_concurrent_positions:
                     actions["skipped_concurrency"] += 1
                     break  # don't keep scanning; we're at the cap
+
+                # Pre-trade risk gate. enforce_risk auto-pauses the bot on
+                # any *serious* violation; if it did, we break out of the
+                # loop since further BUYs would be rejected too.
+                stake_usd = min(
+                    state.master_stake_usd,
+                    float(d.poly_ask_depth_usd or state.master_stake_usd),
+                )
+                report = await enforce_risk(
+                    session,
+                    state,
+                    intended_notional_usd=stake_usd,
+                    bankroll_usd=bankroll,
+                )
+                if not report.passed:
+                    actions["skipped_risk"] += 1
+                    self.stats.last_error = (
+                        "risk: " + "; ".join(v.message for v in report.violations)
+                    )[:512]
+                    if not state.is_running:
+                        # enforce_risk paused us — stop processing.
+                        break
+                    continue
+
                 placed = await self._place_for_decision(session, d, state)
                 if placed:
                     actions["placed"] += 1
