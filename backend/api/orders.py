@@ -1,13 +1,14 @@
-"""Orders + open positions read endpoints."""
+"""Orders + positions read endpoints + manual position close."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.auth import require_auth
 from backend.db import get_session
+from backend.engine.position_manager import manual_close_position
 from backend.models import Order, Position
 
 router = APIRouter(prefix="/api", tags=["orders"])
@@ -86,6 +87,24 @@ async def recent_orders(
     ]
 
 
+def _position_to_row(r: Position) -> PositionRow:
+    return PositionRow(
+        id=r.id,
+        polymarket_event_id=r.polymarket_event_id,
+        token_id=r.token_id,
+        outcome=r.outcome,
+        size=r.size,
+        entry_price=r.entry_price,
+        entry_at=r.entry_at.isoformat() if r.entry_at else "",
+        exit_price=r.exit_price,
+        exit_at=r.exit_at.isoformat() if r.exit_at else None,
+        pnl_usd=r.pnl_usd,
+        status=r.status,
+        entry_order_id=r.entry_order_id,
+        exit_order_id=r.exit_order_id,
+    )
+
+
 @router.get("/positions/open", response_model=list[PositionRow])
 async def open_positions(
     _user: str = Depends(require_auth),
@@ -96,21 +115,54 @@ async def open_positions(
             select(Position).where(Position.status == "OPEN").order_by(desc(Position.id))
         )
     ).scalars().all()
-    return [
-        PositionRow(
-            id=r.id,
-            polymarket_event_id=r.polymarket_event_id,
-            token_id=r.token_id,
-            outcome=r.outcome,
-            size=r.size,
-            entry_price=r.entry_price,
-            entry_at=r.entry_at.isoformat() if r.entry_at else "",
-            exit_price=r.exit_price,
-            exit_at=r.exit_at.isoformat() if r.exit_at else None,
-            pnl_usd=r.pnl_usd,
-            status=r.status,
-            entry_order_id=r.entry_order_id,
-            exit_order_id=r.exit_order_id,
+    return [_position_to_row(r) for r in rows]
+
+
+@router.get("/positions/recent", response_model=list[PositionRow])
+async def recent_positions(
+    limit: int = Query(50, ge=1, le=500),
+    _user: str = Depends(require_auth),
+    session: AsyncSession = Depends(get_session),
+) -> list[PositionRow]:
+    rows = (
+        await session.execute(
+            select(Position).order_by(desc(Position.id)).limit(limit)
         )
-        for r in rows
-    ]
+    ).scalars().all()
+    return [_position_to_row(r) for r in rows]
+
+
+class CloseResult(BaseModel):
+    success: bool
+    message: str
+    position: PositionRow | None = None
+
+
+@router.post("/positions/{position_id}/close", response_model=CloseResult)
+async def close_position(
+    position_id: int,
+    _user: str = Depends(require_auth),
+    session: AsyncSession = Depends(get_session),
+) -> CloseResult:
+    ok, msg = await manual_close_position(session, position_id)
+    row = (
+        await session.execute(select(Position).where(Position.id == position_id))
+    ).scalar_one_or_none()
+    if row is None and not ok:
+        raise HTTPException(status_code=404, detail=msg)
+    return CloseResult(
+        success=ok,
+        message=msg,
+        position=_position_to_row(row) if row else None,
+    )
+
+
+@router.get("/positions/manager-status")
+async def position_manager_status(
+    request: Request,
+    _user: str = Depends(require_auth),
+) -> dict:
+    mgr = getattr(request.app.state, "position_manager", None)
+    if mgr is None:
+        return {"running": False, "stats": None}
+    return {"running": True, "stats": mgr.stats.to_dict()}

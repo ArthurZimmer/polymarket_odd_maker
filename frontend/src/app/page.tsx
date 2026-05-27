@@ -9,6 +9,7 @@ import {
   EngineStatus,
   getToken,
   OrderRow,
+  PositionCloseResult,
   PositionRow,
 } from "@/lib/api";
 import { Nav } from "@/components/Nav";
@@ -318,10 +319,31 @@ function ActionPill({ action }: { action: string }) {
 }
 
 function PositionsTable({ positions }: { positions: PositionRow[] }) {
+  const [closing, setClosing] = useState<number | null>(null);
+  const [errMsg, setErrMsg] = useState<string | null>(null);
+
+  async function closeOne(id: number) {
+    if (!confirm("Fechar essa posição agora (SELL no melhor bid)?")) return;
+    setErrMsg(null);
+    setClosing(id);
+    try {
+      const r = await apiFetch<PositionCloseResult>(
+        `/api/positions/${id}/close`,
+        { method: "POST" },
+      );
+      if (!r.success) setErrMsg(r.message);
+    } catch (e) {
+      setErrMsg((e as Error).message);
+    } finally {
+      setClosing(null);
+    }
+  }
+
   return (
     <div className="mb-5 rounded border border-emerald-200 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950">
       <div className="border-b border-emerald-200 px-3 py-2 text-xs font-semibold uppercase tracking-wide text-emerald-700 dark:border-emerald-800 dark:text-emerald-200">
         Posições abertas ({positions.length})
+        {errMsg && <span className="ml-3 normal-case text-red-600">erro: {errMsg}</span>}
       </div>
       <table className="w-full text-left text-xs">
         <thead className="text-emerald-700/70 dark:text-emerald-300/70">
@@ -331,6 +353,7 @@ function PositionsTable({ positions }: { positions: PositionRow[] }) {
             <th className="px-3 py-1 text-right">Size</th>
             <th className="px-3 py-1 text-right">Entry</th>
             <th className="px-3 py-1">PM event</th>
+            <th className="px-3 py-1 text-right">Ação</th>
           </tr>
         </thead>
         <tbody>
@@ -343,6 +366,16 @@ function PositionsTable({ positions }: { positions: PositionRow[] }) {
               <td className="px-3 py-1 text-right font-mono">{p.size.toFixed(2)}</td>
               <td className="px-3 py-1 text-right font-mono">{p.entry_price.toFixed(4)}</td>
               <td className="px-3 py-1 text-zinc-500">{p.polymarket_event_id}</td>
+              <td className="px-3 py-1 text-right">
+                <button
+                  onClick={() => closeOne(p.id)}
+                  disabled={closing === p.id || p.exit_order_id !== null}
+                  className="rounded border border-emerald-300 bg-white px-2 py-0.5 text-[10px] font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-40 dark:border-emerald-700 dark:bg-emerald-900 dark:text-emerald-200 dark:hover:bg-emerald-800"
+                  title={p.exit_order_id !== null ? "Já tem ordem de saída" : "Fechar agora"}
+                >
+                  {closing === p.id ? "..." : p.exit_order_id !== null ? "saindo" : "Fechar"}
+                </button>
+              </td>
             </tr>
           ))}
         </tbody>

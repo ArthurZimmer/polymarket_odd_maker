@@ -30,6 +30,7 @@ from backend.config import settings
 from backend.db import SessionLocal
 from backend.engine.decision import DecisionEngine
 from backend.engine.odds_bus import OddsBus
+from backend.engine.position_manager import PositionManager
 from backend.engine.trading import TradingEngine
 from backend.matcher.matcher import EventMatcher
 from backend.polymarket.watcher import PolymarketWatcher
@@ -53,16 +54,21 @@ async def lifespan(app: FastAPI):
     matcher = EventMatcher(session_factory=SessionLocal)
     decision_engine = DecisionEngine(session_factory=SessionLocal, dry_run=True)
     trading_engine = TradingEngine(session_factory=SessionLocal)
+    position_manager = PositionManager(session_factory=SessionLocal)
     app.state.bus = bus
     app.state.watcher = watcher
     app.state.scrapers = coordinator
     app.state.matcher = matcher
     app.state.decision_engine = decision_engine
     app.state.trading_engine = trading_engine
+    app.state.position_manager = position_manager
     watcher_task = asyncio.create_task(watcher.run(), name="polymarket-watcher")
     matcher_task = asyncio.create_task(matcher.run(), name="event-matcher")
     decision_task = asyncio.create_task(decision_engine.run(), name="decision-engine")
     trading_task = asyncio.create_task(trading_engine.run(), name="trading-engine")
+    position_task = asyncio.create_task(
+        position_manager.run(), name="position-manager"
+    )
     coordinator.start()
 
     try:
@@ -71,12 +77,14 @@ async def lifespan(app: FastAPI):
         logger.info("Stopping watcher + scrapers + matcher + engines...")
         # Trading first — it tries to cancel live orders before letting go.
         trading_engine.stop()
+        position_manager.stop()
         watcher.stop()
         matcher.stop()
         decision_engine.stop()
         await coordinator.stop()
         for name, task in (
             ("trading", trading_task),
+            ("position-manager", position_task),
             ("watcher", watcher_task),
             ("matcher", matcher_task),
             ("decision", decision_task),

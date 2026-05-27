@@ -359,23 +359,54 @@ class TradingEngine:
         order.filled_avg_price = avg_price
         order.filled_at = datetime.now(UTC)
         self.stats.total_fills += 1
-        # Create OPEN position.
-        session.add(
-            Position(
-                polymarket_event_id=order.polymarket_event_id,
-                token_id=order.token_id,
-                outcome=order.outcome,
-                size=filled_size,
-                entry_price=avg_price,
-                entry_order_id=order.id,
-                status="OPEN",
+        if order.side == "BUY":
+            session.add(
+                Position(
+                    polymarket_event_id=order.polymarket_event_id,
+                    token_id=order.token_id,
+                    outcome=order.outcome,
+                    size=filled_size,
+                    entry_price=avg_price,
+                    entry_order_id=order.id,
+                    status="OPEN",
+                )
             )
+            logger.info(
+                "BUY FILLED: token=%s size=%.2f @ %.4f → OPEN position",
+                order.token_id,
+                filled_size,
+                avg_price,
+            )
+            return
+
+        # SELL → close the Position that submitted this exit order.
+        position = (
+            await session.execute(
+                select(Position).where(Position.exit_order_id == order.id)
+            )
+        ).scalar_one_or_none()
+        if position is None:
+            # Manual sale outside of the manager flow — log and bail, the
+            # order is still recorded. Could happen if exit_order_id linkage
+            # was lost (db restored, manual SQL, etc.).
+            logger.warning(
+                "SELL FILLED with no matching Position: order=%s token=%s",
+                order.id,
+                order.token_id,
+            )
+            return
+        position.status = "CLOSED"
+        position.exit_price = avg_price
+        position.exit_at = order.filled_at
+        position.pnl_usd = round(
+            (avg_price - position.entry_price) * filled_size, 4
         )
         logger.info(
-            "ORDER FILLED: token=%s size=%.2f @ %.4f",
-            order.token_id,
-            filled_size,
+            "SELL FILLED: position=%s token=%s @ %.4f → CLOSED pnl=$%.2f",
+            position.id,
+            position.token_id,
             avg_price,
+            position.pnl_usd,
         )
 
     async def _mark_cancelled(

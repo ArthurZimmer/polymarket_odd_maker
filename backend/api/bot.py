@@ -24,6 +24,7 @@ class BotStateView(BaseModel):
     master_stake_usd: float
     ev_threshold: float
     exit_threshold: float
+    stop_loss_pct: float
     max_concurrent_positions: int
     max_daily_drawdown_usd: float
     min_time_to_game_minutes: int
@@ -38,6 +39,7 @@ class BotStatePatch(BaseModel):
     master_stake_usd: float | None = Field(None, ge=1.0, le=10000.0)
     ev_threshold: float | None = Field(None, ge=0.0, le=1.0)
     exit_threshold: float | None = Field(None, ge=0.0, le=1.0)
+    stop_loss_pct: float | None = Field(None, ge=0.0, le=1.0)
     max_concurrent_positions: int | None = Field(None, ge=1, le=50)
     max_daily_drawdown_usd: float | None = Field(None, ge=1.0, le=100000.0)
     min_time_to_game_minutes: int | None = Field(None, ge=0, le=600)
@@ -63,6 +65,7 @@ def _to_view(row: BotState) -> BotStateView:
         master_stake_usd=row.master_stake_usd,
         ev_threshold=row.ev_threshold,
         exit_threshold=row.exit_threshold,
+        stop_loss_pct=row.stop_loss_pct,
         max_concurrent_positions=row.max_concurrent_positions,
         max_daily_drawdown_usd=row.max_daily_drawdown_usd,
         min_time_to_game_minutes=row.min_time_to_game_minutes,

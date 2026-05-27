@@ -264,6 +264,9 @@ class BotState(Base):
     max_daily_drawdown_usd: Mapped[float] = mapped_column(
         Float, default=100.0, nullable=False
     )
+    stop_loss_pct: Mapped[float] = mapped_column(
+        Float, default=0.30, nullable=False
+    )
     min_time_to_game_minutes: Mapped[int] = mapped_column(
         Integer, default=5, nullable=False
     )

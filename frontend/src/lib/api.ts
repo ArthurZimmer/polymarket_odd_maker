@@ -224,6 +224,7 @@ export interface BotState {
   master_stake_usd: number;
   ev_threshold: number;
   exit_threshold: number;
+  stop_loss_pct: number;
   max_concurrent_positions: number;
   max_daily_drawdown_usd: number;
   min_time_to_game_minutes: number;
@@ -297,4 +298,26 @@ export interface PositionRow {
   status: "OPEN" | "CLOSED";
   entry_order_id: number | null;
   exit_order_id: number | null;
+}
+
+export interface PositionCloseResult {
+  success: boolean;
+  message: string;
+  position: PositionRow | null;
+}
+
+export interface PositionManagerStats {
+  last_run_at: string | null;
+  total_runs: number;
+  last_open_positions: number;
+  last_actions: Record<string, number>;
+  total_sells_submitted: number;
+  total_sells_failed: number;
+  last_error: string | null;
+  vault_unlocked: boolean;
+}
+
+export interface PositionManagerStatus {
+  running: boolean;
+  stats: PositionManagerStats | null;
 }

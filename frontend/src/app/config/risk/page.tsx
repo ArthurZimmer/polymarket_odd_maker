@@ -215,6 +215,14 @@ export default function RiskConfigPage() {
               value={(draft.exit_threshold ?? 0) * 100}
               onChange={(v) => setDraft({ ...draft, exit_threshold: v / 100 })}
             />
+            <NumberInput
+              label="Stop-loss (% queda do entry)"
+              step={1}
+              min={0}
+              max={100}
+              value={(draft.stop_loss_pct ?? 0) * 100}
+              onChange={(v) => setDraft({ ...draft, stop_loss_pct: v / 100 })}
+            />
           </div>
 
           <div className="mt-5 flex items-center justify-between border-t border-zinc-100 pt-4 dark:border-zinc-800">
@@ -253,6 +261,7 @@ function toDraft(s: BotState): BotStatePatch {
     master_stake_usd: s.master_stake_usd,
     ev_threshold: s.ev_threshold,
     exit_threshold: s.exit_threshold,
+    stop_loss_pct: s.stop_loss_pct,
     max_concurrent_positions: s.max_concurrent_positions,
     max_daily_drawdown_usd: s.max_daily_drawdown_usd,
     min_time_to_game_minutes: s.min_time_to_game_minutes,
