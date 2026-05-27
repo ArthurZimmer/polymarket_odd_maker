@@ -253,15 +253,21 @@ def invalidate_balance_cache() -> None:
 async def get_usdc_balance(
     session: AsyncSession, *, force_refresh: bool = False
 ) -> float | None:
-    """Return on-chain USDC collateral balance for the configured wallet.
+    """Return on-chain pUSD balance for the configured wallet.
 
-    Returns None if vault is locked, wallet not configured, or the call
-    fails. Caller treats None as "skip stake check, but other risk gates
-    still apply." Result is cached in memory for BALANCE_CACHE_TTL_S to
-    avoid spamming the Polymarket API every trading cycle.
+    Tries Polymarket's `get_balance_allowance` first (cheap, batched in
+    their backend). When it reports zero — which happens because the lib
+    still maps "COLLATERAL" to the legacy USDC.e address while real funds
+    live in pUSD — falls back to a direct ERC-20 `balanceOf` against the
+    pUSD contract on Polygon.
+
+    Returns None when the vault is locked, wallet isn't configured, or
+    everything fails. Cached for BALANCE_CACHE_TTL_S.
     """
     import asyncio
     import time
+
+    from backend.utils.blockchain import fetch_pusd_balance
 
     now = time.time()
     if (
@@ -278,27 +284,33 @@ async def get_usdc_balance(
     except (VaultLocked, WalletNotConfigured):
         return None
 
+    # 1) Try the CLOB allowance endpoint — fast, single call.
     def _do() -> dict[str, Any] | None:
         client = _build_client(creds)
         return client.get_balance_allowance(
             BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
         )
 
+    balance_usd: float | None = None
     try:
         resp = await asyncio.to_thread(_do)
+        raw = resp.get("balance") if isinstance(resp, dict) else None
+        if raw is not None:
+            balance_usd = float(raw) / 1_000_000.0
     except Exception:
-        logger.exception("Polymarket get_balance_allowance failed")
-        return None
-    if not resp:
-        return None
-    # Polymarket returns balance as a string in USDC base units (1e6 = $1).
-    raw = resp.get("balance") if isinstance(resp, dict) else None
-    if raw is None:
-        return None
-    try:
-        balance_usd = float(raw) / 1_000_000.0
-    except (TypeError, ValueError):
-        return None
+        logger.exception("Polymarket get_balance_allowance failed (will try RPC fallback)")
+
+    # 2) Fallback / cross-check: read pUSD directly from Polygon. The user's
+    #    tradable funds are on the proxy wallet (`funder`) when present.
+    if balance_usd is None or balance_usd == 0.0:
+        target = creds.funder or creds.address
+        try:
+            balance_usd = await fetch_pusd_balance(target)
+        except Exception:
+            logger.exception("pUSD direct balance read failed for %s", target)
+            if balance_usd is None:
+                return None
+
     _BALANCE_CACHE["value"] = balance_usd
     _BALANCE_CACHE["fetched_at"] = now
     return balance_usd

@@ -109,6 +109,9 @@ class TheOddsApiScraper(BookmakerScraper):
         # Quota tracking — populated from response headers.
         self.quota_used: int | None = None
         self.quota_remaining: int | None = None
+        # Set to True on first 401 so we stop hammering the endpoint until
+        # the process restarts with a fresh key.
+        self._api_key_disabled: bool = False
         self._session = curl_requests.Session(
             impersonate="chrome120",
             headers={"accept": "application/json"},
@@ -120,6 +123,10 @@ class TheOddsApiScraper(BookmakerScraper):
             # Stay alive but silent. Lets us mount the scraper in dev without
             # spamming the stats with errors.
             return 0
+        if self._api_key_disabled:
+            # We saw a 401 — don't keep hammering the endpoint every cycle.
+            # User has to restart the backend with a fresh key to retry.
+            return 0
         import asyncio
 
         total = 0
@@ -128,6 +135,20 @@ class TheOddsApiScraper(BookmakerScraper):
                 parsed = await asyncio.to_thread(
                     self._fetch_sport_sync, sport_key, canonical
                 )
+            except RuntimeError as exc:
+                msg = str(exc)
+                if "401" in msg:
+                    # Bad key — log once at warning, disable the scraper for
+                    # this process lifetime. Restart after fixing THE_ODDS_API_KEY.
+                    if not self._api_key_disabled:
+                        logger.warning(
+                            "TheOddsApi: API key rejected (401). Disabling "
+                            "until process restart — set a valid THE_ODDS_API_KEY in .env."
+                        )
+                        self._api_key_disabled = True
+                    return 0
+                logger.exception("TheOddsApi sport=%s failed", sport_key)
+                continue
             except Exception:
                 logger.exception("TheOddsApi sport=%s failed", sport_key)
                 continue

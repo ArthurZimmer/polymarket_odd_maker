@@ -52,10 +52,14 @@ async def _to_view(row: WalletConfig | None, *, fetch_balance: bool = True) -> W
         )
     balance: float | None = None
     if fetch_balance:
+        # Tradable balance lives on the Polymarket proxy wallet (`funder`)
+        # when one is configured. EOA only holds the balance for users who
+        # trade without a proxy — fall back to that.
+        target = row.funder_address or row.address
         try:
-            balance = await fetch_usdc_balance(row.address)
+            balance = await fetch_usdc_balance(target)
         except Exception:
-            logger.exception("Failed to fetch USDC balance for %s", row.address)
+            logger.exception("Failed to fetch pUSD balance for %s", target)
     return WalletView(
         address=row.address,
         has_credentials=True,

@@ -28,7 +28,11 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_ttl_minutes: int = 15
 
-    polygon_rpc_url: str = "https://polygon-rpc.com"
+    # Default RPC: publicnode.com (no key required, ~250ms). The original
+    # `polygon-rpc.com` started requiring API keys in 2026 ("tenant disabled")
+    # — override via POLYGON_RPC_URL env if you have a paid Alchemy/Infura/
+    # QuickNode endpoint.
+    polygon_rpc_url: str = "https://polygon-bor-rpc.publicnode.com"
     polymarket_clob_url: str = "https://clob.polymarket.com"
 
     the_odds_api_key: str | None = None
