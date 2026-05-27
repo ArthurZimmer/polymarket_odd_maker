@@ -28,12 +28,9 @@ from typing import Any
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import BotState, Order, Position
+from backend.models import ORDER_NON_TERMINAL, BotState, Order, Position
 
 logger = logging.getLogger(__name__)
-
-# Order statuses that still tie up funds (await fill or cancel).
-NON_TERMINAL_BUY_STATUSES = ("PENDING_SUBMIT", "SUBMITTED", "PARTIAL")
 
 
 @dataclass(slots=True)
@@ -98,7 +95,7 @@ async def _pending_buy_orders(session: AsyncSession) -> tuple[int, float]:
             select(Order).where(
                 and_(
                     Order.side == "BUY",
-                    Order.status.in_(NON_TERMINAL_BUY_STATUSES),
+                    Order.status.in_(ORDER_NON_TERMINAL),
                 )
             )
         )

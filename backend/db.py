@@ -29,7 +29,11 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSe
 def _sqlite_pragma_on_connect(dbapi_conn, _connection_record) -> None:
     cursor = dbapi_conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA synchronous=NORMAL")  # safe with WAL; ~5x faster than FULL
+    # FULL is slower than NORMAL but guarantees durability against OS crashes.
+    # Acceptable trade-off for a single-user bot trading real USDC: a few extra
+    # milliseconds per commit beats losing the record of a trade we just sent
+    # to the CLOB.
+    cursor.execute("PRAGMA synchronous=FULL")
     cursor.execute("PRAGMA busy_timeout=5000")
     cursor.close()
 

@@ -35,6 +35,7 @@ from backend.engine.ev import (
     map_pm_outcome_to_side,
 )
 from backend.models import (
+    BotState,
     DecisionLog,
     EventMatch,
     ExternalEvent,
@@ -46,15 +47,50 @@ from backend.models import (
 logger = logging.getLogger(__name__)
 
 
-# Defaults from the plan — will become user-tunable in Etapa 11 (Risk).
-EV_THRESHOLD = 0.03                # 3% EV required to fire BUY
-EXIT_THRESHOLD = 0.005             # used by PositionManager later
-MIN_TIME_TO_GAME_S = 5 * 60        # 5 min — too close to live: skip
-MAX_TIME_TO_GAME_S = 120 * 60      # 2h — too far out: orderbooks too thin
-MIN_ASK_DEPTH_USD = 100.0          # need at least this in book at best ask
-SNAPSHOT_MAX_AGE_S = 90.0          # poly/ext snapshot can't be older than this
-MASTER_STAKE_USD = 10.0            # used as base stake for proposed_stake_usd
-RUN_INTERVAL_S = 10.0              # how often the engine cycles
+# Defaults — used only when no BotState row exists yet. Otherwise every
+# threshold is read from BotState each cycle via _RuntimeKnobs.
+DEFAULT_EV_THRESHOLD = 0.03
+DEFAULT_MIN_TIME_TO_GAME_S = 5 * 60
+DEFAULT_MAX_TIME_TO_GAME_S = 120 * 60
+DEFAULT_MIN_ASK_DEPTH_USD = 100.0
+DEFAULT_MASTER_STAKE_USD = 10.0
+
+SNAPSHOT_MAX_AGE_S = 90.0           # poly/ext snapshot can't be older than this (not user-tunable)
+RUN_INTERVAL_S = 10.0               # how often the engine cycles
+
+
+@dataclass(slots=True)
+class _RuntimeKnobs:
+    """Snapshot of BotState knobs at the start of a DecisionEngine cycle.
+
+    Read once per cycle to keep behaviour consistent across the iteration
+    and so the user's slider changes in /config/risk take effect on the
+    next tick (instead of the engine using the constants it was imported
+    with).
+    """
+    ev_threshold: float
+    min_time_to_game_s: float
+    max_time_to_game_s: float
+    min_ask_depth_usd: float
+    master_stake_usd: float
+
+    @classmethod
+    def from_state(cls, state: BotState | None) -> "_RuntimeKnobs":
+        if state is None:
+            return cls(
+                ev_threshold=DEFAULT_EV_THRESHOLD,
+                min_time_to_game_s=DEFAULT_MIN_TIME_TO_GAME_S,
+                max_time_to_game_s=DEFAULT_MAX_TIME_TO_GAME_S,
+                min_ask_depth_usd=DEFAULT_MIN_ASK_DEPTH_USD,
+                master_stake_usd=DEFAULT_MASTER_STAKE_USD,
+            )
+        return cls(
+            ev_threshold=state.ev_threshold,
+            min_time_to_game_s=state.min_time_to_game_minutes * 60,
+            max_time_to_game_s=state.max_time_to_game_minutes * 60,
+            min_ask_depth_usd=state.min_ask_depth_usd,
+            master_stake_usd=state.master_stake_usd,
+        )
 
 
 # Decision action codes — kept short for easy filtering in the UI.
@@ -138,10 +174,10 @@ class DecisionEngine:
 
     async def run(self) -> None:
         logger.info(
-            "DecisionEngine starting (dry_run=%s, interval=%.0fs, ev>=%.0f%%)",
+            "DecisionEngine starting (dry_run=%s, interval=%.0fs, default_ev>=%.0f%%)",
             self.dry_run,
             RUN_INTERVAL_S,
-            EV_THRESHOLD * 100,
+            DEFAULT_EV_THRESHOLD * 100,
         )
         while not self._stop.is_set():
             try:
@@ -163,6 +199,11 @@ class DecisionEngine:
         n_buy = 0
 
         async with self.session_factory() as session:
+            state = (
+                await session.execute(select(BotState).where(BotState.id == 1))
+            ).scalar_one_or_none()
+            knobs = _RuntimeKnobs.from_state(state)
+
             titles = await self._load_titles(session)
             matches = await self._load_matches(session)
             if not matches:
@@ -211,11 +252,11 @@ class DecisionEngine:
                 seconds_to_kickoff = (start_time - now).total_seconds()
 
                 # Window gate (per PM event, not per token).
-                if seconds_to_kickoff > MAX_TIME_TO_GAME_S:
+                if seconds_to_kickoff > knobs.max_time_to_game_s:
                     await self._log_one(
                         session,
                         action=Action.PASS_WINDOW_EARLY,
-                        reason=f"kickoff in {seconds_to_kickoff/60:.0f}min (> {MAX_TIME_TO_GAME_S/60:.0f}min)",
+                        reason=f"kickoff in {seconds_to_kickoff/60:.0f}min (> {knobs.max_time_to_game_s/60:.0f}min)",
                         match=event_matches[0],
                         ext=canonical_ext,
                         title=title,
@@ -224,11 +265,11 @@ class DecisionEngine:
                     passes[Action.PASS_WINDOW_EARLY] += 1
                     n_eval += 1
                     continue
-                if seconds_to_kickoff < MIN_TIME_TO_GAME_S:
+                if seconds_to_kickoff < knobs.min_time_to_game_s:
                     await self._log_one(
                         session,
                         action=Action.PASS_WINDOW_LATE,
-                        reason=f"kickoff in {seconds_to_kickoff/60:.0f}min (< {MIN_TIME_TO_GAME_S/60:.0f}min) — live or imminent",
+                        reason=f"kickoff in {seconds_to_kickoff/60:.0f}min (< {knobs.min_time_to_game_s/60:.0f}min) — live or imminent",
                         match=event_matches[0],
                         ext=canonical_ext,
                         title=title,
@@ -264,6 +305,7 @@ class DecisionEngine:
                         ext=canonical_ext,
                         probs_by_book=probs_by_book,
                         now=now,
+                        knobs=knobs,
                     )
                     if action == Action.BUY:
                         n_buy += 1
@@ -421,6 +463,7 @@ class DecisionEngine:
         ext: ExternalEvent,
         probs_by_book: dict[str, dict[str, float]],
         now: datetime,
+        knobs: _RuntimeKnobs,
     ) -> tuple[str, str, dict[str, Any]]:
         side = map_pm_outcome_to_side(token.outcome, ext.home_team, ext.away_team)
         if side is None:
@@ -474,10 +517,10 @@ class DecisionEngine:
                 },
             )
         depth = poly.ask_depth_usd or 0.0
-        if depth < MIN_ASK_DEPTH_USD:
+        if depth < knobs.min_ask_depth_usd:
             return (
                 Action.PASS_LIQUIDITY,
-                f"ask depth ${depth:.0f} < ${MIN_ASK_DEPTH_USD:.0f}",
+                f"ask depth ${depth:.0f} < ${knobs.min_ask_depth_usd:.0f}",
                 {
                     "outcome_side": side,
                     "fair_prob": fair_prob,
@@ -498,9 +541,9 @@ class DecisionEngine:
             "pinnacle_raw_prob": side_probs_per_book.get("pinnacle"),
             "ev": ev,
             "proposed_price": poly.best_ask,
-            "proposed_stake_usd": min(MASTER_STAKE_USD, depth),
+            "proposed_stake_usd": min(knobs.master_stake_usd, depth),
         }
-        if ev < EV_THRESHOLD:
+        if ev < knobs.ev_threshold:
             return (
                 Action.PASS_LOW_EV,
                 f"EV {ev*100:.2f}% on {side} ({book_summary})",

@@ -30,6 +30,7 @@ class OrderRow(BaseModel):
     filled_avg_price: float | None
     decision_id: int | None
     last_error: str | None
+    exit_policy: str | None
     created_at: str
     submitted_at: str | None
     filled_at: str | None
@@ -47,6 +48,7 @@ class PositionRow(BaseModel):
     exit_price: float | None
     exit_at: str | None
     pnl_usd: float | None
+    realized_pnl_partial_usd: float
     status: str
     entry_order_id: int | None
     exit_order_id: int | None
@@ -78,6 +80,7 @@ async def recent_orders(
             filled_avg_price=r.filled_avg_price,
             decision_id=r.decision_id,
             last_error=r.last_error,
+            exit_policy=r.exit_policy,
             created_at=r.created_at.isoformat() if r.created_at else "",
             submitted_at=r.submitted_at.isoformat() if r.submitted_at else None,
             filled_at=r.filled_at.isoformat() if r.filled_at else None,
@@ -99,6 +102,7 @@ def _position_to_row(r: Position) -> PositionRow:
         exit_price=r.exit_price,
         exit_at=r.exit_at.isoformat() if r.exit_at else None,
         pnl_usd=r.pnl_usd,
+        realized_pnl_partial_usd=r.realized_pnl_partial_usd or 0.0,
         status=r.status,
         entry_order_id=r.entry_order_id,
         exit_order_id=r.exit_order_id,

@@ -418,6 +418,7 @@ export interface OrderRow {
   filled_avg_price: number | null;
   decision_id: number | null;
   last_error: string | null;
+  exit_policy: "ride" | "cancel" | null;
   created_at: string;
   submitted_at: string | null;
   filled_at: string | null;
@@ -435,6 +436,7 @@ export interface PositionRow {
   exit_price: number | null;
   exit_at: string | null;
   pnl_usd: number | null;
+  realized_pnl_partial_usd: number;
   status: "OPEN" | "CLOSED";
   entry_order_id: number | null;
   exit_order_id: number | null;

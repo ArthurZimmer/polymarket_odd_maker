@@ -9,9 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.auth import require_auth
-from backend.crypto.vault import VaultState
+from backend.crypto.vault import VaultLocked, VaultState
 from backend.db import get_session
 from backend.models import WalletConfig
+from backend.polymarket.clob_client import invalidate_balance_cache
 from backend.utils.blockchain import derive_address, fetch_usdc_balance
 
 logger = logging.getLogger(__name__)
@@ -83,9 +84,15 @@ async def put_wallet(
         address = derive_address(body.private_key)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid private key: {exc}") from exc
-    enc_pk = VaultState.encrypt(body.private_key)
-    enc_ak = VaultState.encrypt(body.api_key) if body.api_key else None
-    enc_as = VaultState.encrypt(body.api_secret) if body.api_secret else None
+    try:
+        enc_pk = VaultState.encrypt(body.private_key)
+        enc_ak = VaultState.encrypt(body.api_key) if body.api_key else None
+        enc_as = VaultState.encrypt(body.api_secret) if body.api_secret else None
+    except VaultLocked as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Vault locked — log in again.",
+        ) from exc
     row = await _load(session)
     if row is None:
         row = WalletConfig(id=1, address=address, encrypted_private_key=enc_pk)
@@ -98,6 +105,9 @@ async def put_wallet(
     row.funder_address = body.funder_address
     await session.commit()
     await session.refresh(row)
+    # Wallet changed → the cached USDC balance now belongs to the previous
+    # wallet. Next risk-gate evaluation must hit the chain fresh.
+    invalidate_balance_cache()
     return await _to_view(row)
 
 
@@ -110,3 +120,4 @@ async def delete_wallet(
     if row is not None:
         await session.delete(row)
         await session.commit()
+    invalidate_balance_cache()

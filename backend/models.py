@@ -25,6 +25,19 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+# Centralized order-state semantics — imported by trading.py, position_manager.py,
+# risk.py, etc. PARTIAL is an in-flight order with some fills but not done yet.
+ORDER_NON_TERMINAL: frozenset[str] = frozenset(
+    {"PENDING_SUBMIT", "SUBMITTED", "PARTIAL"}
+)
+ORDER_TERMINAL: frozenset[str] = frozenset({"FILLED", "CANCELLED", "FAILED"})
+
+
+# Exit-policy semantics for SELL orders created by the PositionManager.
+EXIT_POLICY_RIDE = "ride"      # don't cancel on stale; let it ride to event resolution
+EXIT_POLICY_CANCEL = "cancel"  # cancel after ORDER_STALE_TIMEOUT_S and let manager retry
+
+
 class WalletConfig(Base):
     __tablename__ = "wallet_config"
 
@@ -314,6 +327,9 @@ class Order(Base):
     filled_avg_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     decision_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     last_error: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # SELL-only: 'ride' (don't cancel on stale) or 'cancel' (cancel + retry).
+    # NULL for BUYs (no exit policy concept).
+    exit_policy: Mapped[str | None] = mapped_column(String(8), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, nullable=False)
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_polled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -346,6 +362,11 @@ class Position(Base):
     exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     exit_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     pnl_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # PnL realized through partial-fill cancels before the position closes
+    # fully. Final pnl_usd at CLOSED time = sum(partial_realized) + last close.
+    realized_pnl_partial_usd: Mapped[float] = mapped_column(
+        Float, default=0.0, nullable=False
+    )
     status: Mapped[str] = mapped_column(String(16), default="OPEN", nullable=False)
     entry_order_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     exit_order_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -353,4 +374,5 @@ class Position(Base):
     __table_args__ = (
         Index("idx_positions_status", "status"),
         Index("idx_positions_token", "token_id"),
+        Index("idx_positions_exit_at", "exit_at"),
     )

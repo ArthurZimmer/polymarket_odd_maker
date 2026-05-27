@@ -37,6 +37,9 @@ from backend.engine.ev import (
     map_pm_outcome_to_side,
 )
 from backend.models import (
+    EXIT_POLICY_CANCEL,
+    EXIT_POLICY_RIDE,
+    ORDER_NON_TERMINAL,
     BotState,
     EventMatch,
     ExternalEvent,
@@ -57,16 +60,24 @@ RUN_INTERVAL_S = 15.0
 # rather close at a slightly old fair than hold blind.
 SNAPSHOT_MAX_AGE_S = 9 * 60
 
-# Order statuses still in flight; if an exit_order is in one of these we
-# don't queue another one for the same position.
-NON_TERMINAL_STATUSES = {"PENDING_SUBMIT", "SUBMITTED", "PARTIAL"}
-
 
 class ExitReason:
     CONVERGENCE = "EXIT_CONVERGENCE"
     TIME_CRITICAL = "EXIT_TIME_CRITICAL"
     STOP_LOSS = "EXIT_STOP_LOSS"
     MANUAL = "EXIT_MANUAL"
+
+
+# Stop-loss is the only path where we want the SELL to give up and retry if it
+# can't fill — keeping a stop-loss SELL parked while the bid keeps falling is
+# strictly worse than rebuilding it at the new bid. Convergence/time-critical/
+# manual exits "ride" until the event resolves on-chain.
+_POLICY_BY_REASON: dict[str, str] = {
+    ExitReason.STOP_LOSS: EXIT_POLICY_CANCEL,
+    ExitReason.CONVERGENCE: EXIT_POLICY_RIDE,
+    ExitReason.TIME_CRITICAL: EXIT_POLICY_RIDE,
+    ExitReason.MANUAL: EXIT_POLICY_RIDE,
+}
 
 
 @dataclass
@@ -228,6 +239,7 @@ async def submit_exit_order(
     if size <= 0:
         return False, "invalid_size"
 
+    policy = _POLICY_BY_REASON.get(reason_code, EXIT_POLICY_RIDE)
     order = Order(
         polymarket_order_id=None,
         polymarket_event_id=position.polymarket_event_id,
@@ -239,6 +251,7 @@ async def submit_exit_order(
         notional_usd=round(bid * size, 4),
         order_type="GTC",
         status="PENDING_SUBMIT",
+        exit_policy=policy,
         last_error=f"{reason_code}: {reason_msg}"[:512],
     )
     session.add(order)
@@ -332,7 +345,7 @@ class PositionManager:
                 # Skip if already exiting via a live order.
                 if p.exit_order_id is not None:
                     existing = await session.get(Order, p.exit_order_id)
-                    if existing and existing.status in NON_TERMINAL_STATUSES:
+                    if existing and existing.status in ORDER_NON_TERMINAL:
                         actions["already_exiting"] += 1
                         continue
 
@@ -356,6 +369,14 @@ class PositionManager:
         state: BotState,
         now: datetime,
     ) -> str:
+        # Race protection: the order poller (another asyncio task on a
+        # separate session) may have closed this position between the outer
+        # query and now. Refresh from DB and re-confirm OPEN before doing
+        # anything that could create an order.
+        await session.refresh(position)
+        if position.status != "OPEN":
+            return "already_closed"
+
         poly = await _latest_poly_snapshot(session, position.token_id)
         if poly is None or poly.best_bid is None or poly.best_bid <= 0:
             return "no_poly_snap"
@@ -447,11 +468,13 @@ async def manual_close_position(
     position = await session.get(Position, position_id)
     if position is None:
         return False, "position not found"
+    # Race protection (see _evaluate_position).
+    await session.refresh(position)
     if position.status != "OPEN":
         return False, f"position is {position.status}, not OPEN"
     if position.exit_order_id is not None:
         existing = await session.get(Order, position.exit_order_id)
-        if existing and existing.status in NON_TERMINAL_STATUSES:
+        if existing and existing.status in ORDER_NON_TERMINAL:
             return False, "exit order already in flight"
 
     poly = await _latest_poly_snapshot(session, position.token_id)

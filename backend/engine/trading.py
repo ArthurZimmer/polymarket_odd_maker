@@ -26,9 +26,19 @@ from sqlalchemy import and_, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.crypto.vault import VaultLocked, VaultState
-from backend.models import BotState, DecisionLog, Order, Position, PolymarketToken
+from backend.models import (
+    ORDER_NON_TERMINAL,
+    ORDER_TERMINAL,
+    EXIT_POLICY_CANCEL,
+    BotState,
+    DecisionLog,
+    Order,
+    Position,
+    PolymarketToken,
+)
 from backend.polymarket.clob_client import (
     WalletNotConfigured,
+    _extract_fill_data,
     cancel_order,
     get_order,
     get_usdc_balance,
@@ -44,8 +54,8 @@ ORDER_POLL_INTERVAL_S = 3.0
 ORDER_STALE_TIMEOUT_S = 600.0          # cancel SUBMITTED orders that don't fill in 10min
 ORDER_RECONCILE_ON_START_S = 30.0      # cancel orders left over from previous run older than this
 
-# Terminal states we never poll again.
-TERMINAL_STATUSES = {"FILLED", "CANCELLED", "FAILED"}
+# Backwards-compatible alias for ORDER_TERMINAL — keep until call sites move over.
+TERMINAL_STATUSES = ORDER_TERMINAL
 
 
 @dataclass
@@ -338,6 +348,22 @@ class TradingEngine:
             except asyncio.TimeoutError:
                 pass
 
+    @staticmethod
+    def _is_stale(order: Order, now: datetime) -> bool:
+        if not order.submitted_at:
+            return False
+        submitted = order.submitted_at.replace(tzinfo=UTC)
+        return (now - submitted).total_seconds() > ORDER_STALE_TIMEOUT_S
+
+    @staticmethod
+    def _should_cancel_on_stale(order: Order) -> bool:
+        """BUYs always cancel on stale (cap on capital lockup). SELLs follow
+        the `exit_policy` set at submit-time: 'ride' lets it live until the
+        event resolves, 'cancel' allows retry."""
+        if order.side != "SELL":
+            return True
+        return order.exit_policy == EXIT_POLICY_CANCEL
+
     async def _poll_open_orders(self) -> None:
         if not VaultState.is_unlocked():
             return
@@ -347,7 +373,7 @@ class TradingEngine:
                     select(Order)
                     .where(
                         and_(
-                            Order.status == "SUBMITTED",
+                            Order.status.in_({"SUBMITTED", "PARTIAL"}),
                             Order.polymarket_order_id.is_not(None),
                         )
                     )
@@ -360,31 +386,73 @@ class TradingEngine:
                 resp = await get_order(session, o.polymarket_order_id)  # type: ignore[arg-type]
                 o.last_polled_at = now
                 if not resp:
-                    # Stale check: cancel if outstanding too long.
-                    age = (
-                        now - (o.submitted_at.replace(tzinfo=UTC) if o.submitted_at else now)
-                    ).total_seconds()
-                    if age > ORDER_STALE_TIMEOUT_S:
+                    if self._is_stale(o, now) and self._should_cancel_on_stale(o):
                         await self._mark_cancelled(session, o, reason="stale, no remote echo")
                     continue
+
                 status = (resp.get("status") or "").lower()
-                size_matched = float(resp.get("size_matched") or 0.0)
-                if status in {"matched", "filled"}:
-                    await self._mark_filled(session, o, filled_size=size_matched or o.size, avg_price=o.price)
-                elif status in {"canceled", "cancelled"}:
-                    await self._mark_cancelled(session, o, reason="remote canceled")
+                size_matched, avg_price = _extract_fill_data(resp, fallback_price=o.price)
+                # A "full" fill means we matched the entire size (within float dust).
+                full_fill = size_matched > 0 and abs(size_matched - o.size) < 1e-6
+
+                if status in {"canceled", "cancelled"}:
+                    # Remote cancel: handle any partial that landed first.
+                    await self._mark_partial_cancelled(
+                        session, o,
+                        partial_size=size_matched,
+                        partial_avg=avg_price,
+                        reason="remote canceled",
+                    )
+                elif full_fill or status == "filled":
+                    await self._mark_filled(
+                        session, o,
+                        filled_size=size_matched or o.size,
+                        avg_price=avg_price,
+                    )
+                elif status == "matched":
+                    # Partial fill that hasn't completed yet — record progress
+                    # but don't close the position.
+                    await self._mark_partial(session, o, size_matched, avg_price)
+                    if self._is_stale(o, now) and self._should_cancel_on_stale(o):
+                        if await cancel_order(session, o.polymarket_order_id):  # type: ignore[arg-type]
+                            await self._mark_partial_cancelled(
+                                session, o,
+                                partial_size=size_matched,
+                                partial_avg=avg_price,
+                                reason=f"stale > {ORDER_STALE_TIMEOUT_S:.0f}s",
+                            )
                 else:
-                    # Still live. Partial fill tracking:
+                    # Still 'live' / 'delayed' / unknown — track progress only.
                     if size_matched and size_matched != o.filled_size:
-                        o.filled_size = size_matched
-                    age = (
-                        now - (o.submitted_at.replace(tzinfo=UTC) if o.submitted_at else now)
-                    ).total_seconds()
-                    if age > ORDER_STALE_TIMEOUT_S:
-                        ok = await cancel_order(session, o.polymarket_order_id)  # type: ignore[arg-type]
-                        if ok:
-                            await self._mark_cancelled(session, o, reason=f"stale > {ORDER_STALE_TIMEOUT_S:.0f}s")
+                        await self._mark_partial(session, o, size_matched, avg_price)
+                    if self._is_stale(o, now) and self._should_cancel_on_stale(o):
+                        if await cancel_order(session, o.polymarket_order_id):  # type: ignore[arg-type]
+                            await self._mark_partial_cancelled(
+                                session, o,
+                                partial_size=size_matched,
+                                partial_avg=avg_price,
+                                reason=f"stale > {ORDER_STALE_TIMEOUT_S:.0f}s",
+                            )
             await session.commit()
+
+    async def _mark_partial(
+        self,
+        session: AsyncSession,
+        order: Order,
+        filled_size: float,
+        avg_price: float,
+    ) -> None:
+        """Order touched but not done — keep it live, just update counters.
+
+        Positions are only created/closed at FILLED time; until then a partial
+        SELL doesn't decrement Position.size (that only happens if we cancel
+        it via `_mark_partial_cancelled`).
+        """
+        if filled_size <= 0:
+            return
+        order.status = "PARTIAL"
+        order.filled_size = filled_size
+        order.filled_avg_price = avg_price
 
     async def _mark_filled(
         self, session: AsyncSession, order: Order, *, filled_size: float, avg_price: float
@@ -430,19 +498,98 @@ class TradingEngine:
                 order.token_id,
             )
             return
+        # Authoritative close size: the Position's *current* size (which may
+        # already reflect earlier partial-cancel decrements). Polymarket's
+        # `filled_size` can come back rounded; trust our own ledger.
+        close_size = min(filled_size, position.size)
+        last_pnl = (avg_price - position.entry_price) * close_size
         position.status = "CLOSED"
         position.exit_price = avg_price
         position.exit_at = order.filled_at
         position.pnl_usd = round(
-            (avg_price - position.entry_price) * filled_size, 4
+            (position.realized_pnl_partial_usd or 0.0) + last_pnl, 4
         )
+        if close_size < position.size - 1e-6:
+            logger.warning(
+                "SELL FILLED short: position=%s expected=%.4f filled=%.4f — "
+                "closed with available-fill PnL only",
+                position.id, position.size, close_size,
+            )
         logger.info(
-            "SELL FILLED: position=%s token=%s @ %.4f → CLOSED pnl=$%.2f",
+            "SELL FILLED: position=%s token=%s @ %.4f → CLOSED pnl=$%.2f "
+            "(partial_acc=$%.2f)",
             position.id,
             position.token_id,
             avg_price,
             position.pnl_usd,
+            position.realized_pnl_partial_usd or 0.0,
         )
+
+    async def _mark_partial_cancelled(
+        self,
+        session: AsyncSession,
+        order: Order,
+        *,
+        partial_size: float,
+        partial_avg: float,
+        reason: str,
+    ) -> None:
+        """Order cancelled (remote or via stale-timeout). If a partial fill
+        landed before the cancel, decrement the linked Position so future
+        SELLs sell the right remaining size.
+        """
+        order.status = "CANCELLED"
+        order.cancelled_at = datetime.now(UTC)
+        order.last_error = reason
+        if partial_size > 0:
+            order.filled_size = partial_size
+            order.filled_avg_price = partial_avg
+
+        if order.side != "SELL" or partial_size <= 0:
+            logger.info(
+                "ORDER CANCELLED: id=%s side=%s reason=%s",
+                order.polymarket_order_id, order.side, reason,
+            )
+            return
+
+        position = (
+            await session.execute(
+                select(Position).where(Position.exit_order_id == order.id)
+            )
+        ).scalar_one_or_none()
+        if position is None:
+            logger.info(
+                "ORDER CANCELLED (no Position link): id=%s side=SELL partial=%.4f",
+                order.polymarket_order_id, partial_size,
+            )
+            return
+
+        sold = min(partial_size, position.size)
+        realized = round((partial_avg - position.entry_price) * sold, 4)
+        remaining = position.size - sold
+        position.realized_pnl_partial_usd = round(
+            (position.realized_pnl_partial_usd or 0.0) + realized, 4
+        )
+        if remaining < 1e-6:
+            # Partial actually covered the whole position — close fully.
+            position.status = "CLOSED"
+            position.exit_price = partial_avg
+            position.exit_at = order.cancelled_at
+            position.pnl_usd = position.realized_pnl_partial_usd
+            logger.info(
+                "SELL partial cancelled — position fully sold: id=%s pnl=$%.2f",
+                position.id, position.pnl_usd,
+            )
+        else:
+            # Stay OPEN with reduced size; clear exit_order_id so the next
+            # manager cycle can retry on what's left.
+            position.size = round(remaining, 6)
+            position.exit_order_id = None
+            logger.info(
+                "SELL partial cancelled: position=%s sold=%.4f remaining=%.4f "
+                "realized_partial=$%.2f",
+                position.id, sold, remaining, position.realized_pnl_partial_usd,
+            )
 
     async def _mark_cancelled(
         self, session: AsyncSession, order: Order, *, reason: str
@@ -481,7 +628,11 @@ class TradingEngine:
             )
 
     async def _cancel_all_live_orders(self, reason: str) -> None:
-        """Best-effort cancel of all SUBMITTED orders on shutdown."""
+        """Best-effort cancel of all in-flight orders on shutdown.
+
+        Use `_mark_partial_cancelled` so any partial fill that landed earlier
+        is accounted for in the linked Position before we walk away.
+        """
         if not VaultState.is_unlocked():
             return
         try:
@@ -490,7 +641,7 @@ class TradingEngine:
                     await session.execute(
                         select(Order).where(
                             and_(
-                                Order.status == "SUBMITTED",
+                                Order.status.in_({"SUBMITTED", "PARTIAL"}),
                                 Order.polymarket_order_id.is_not(None),
                             )
                         )
@@ -499,7 +650,12 @@ class TradingEngine:
                 for o in rows:
                     ok = await cancel_order(session, o.polymarket_order_id)  # type: ignore[arg-type]
                     if ok:
-                        await self._mark_cancelled(session, o, reason=reason)
+                        await self._mark_partial_cancelled(
+                            session, o,
+                            partial_size=o.filled_size or 0.0,
+                            partial_avg=o.filled_avg_price or o.price,
+                            reason=reason,
+                        )
                 await session.commit()
                 if rows:
                     logger.info("Cancelled %d live orders on shutdown", len(rows))

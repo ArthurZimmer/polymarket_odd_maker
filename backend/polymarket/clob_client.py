@@ -176,13 +176,44 @@ async def place_limit_order(
         )
     # Response shape (per docs):
     #   { "success": True, "errorMsg": "", "orderID": "...", "transactionsHashes": [...], "status": "live" }
+    # Be strict: missing `success` field OR missing order id means we did NOT
+    # confirm a successful submission. Treating a malformed response as
+    # success would create an Order zombie (status=SUBMITTED with
+    # polymarket_order_id=NULL — the poller filter would never touch it).
+    pm_order_id = resp.get("orderID") or resp.get("order_id")
     return PlacedOrder(
-        polymarket_order_id=resp.get("orderID") or resp.get("order_id"),
+        polymarket_order_id=pm_order_id,
         status=str(resp.get("status") or "unknown"),
-        success=bool(resp.get("success", True)),
+        success=bool(resp.get("success", False)) and bool(pm_order_id),
         error_msg=resp.get("errorMsg") or None,
         raw=resp,
     )
+
+
+def _extract_fill_data(
+    resp: dict[str, Any], fallback_price: float
+) -> tuple[float, float]:
+    """Pull (filled_size, avg_price) from a CLOB get_order response.
+
+    Polymarket CLOB field names drift between versions; we try the canonical
+    ones for the average fill price and only fall back to the order's limit
+    price if the response is silent. The limit-price fallback is conservative
+    (it's a worst-case bound), and we log when it happens so a real fill at a
+    different average doesn't silently corrupt PnL.
+    """
+    size_matched = float(resp.get("size_matched") or resp.get("filled_size") or 0.0)
+    raw_avg = (
+        resp.get("price_matched")
+        or resp.get("average_price")
+        or resp.get("avg_price")
+        or resp.get("filled_avg_price")
+    )
+    if raw_avg is not None:
+        try:
+            return size_matched, float(raw_avg)
+        except (TypeError, ValueError):
+            pass
+    return size_matched, fallback_price
 
 
 async def get_order(session: AsyncSession, order_id: str) -> dict[str, Any] | None:
@@ -207,6 +238,16 @@ async def get_order(session: AsyncSession, order_id: str) -> dict[str, Any] | No
 # BALANCE_CACHE_TTL_S seconds at most.
 _BALANCE_CACHE: dict[str, Any] = {"value": None, "fetched_at": 0.0}
 BALANCE_CACHE_TTL_S = 30.0
+
+
+def invalidate_balance_cache() -> None:
+    """Wipe the cache so the next get_usdc_balance() goes to the network.
+
+    Call after any change that makes the cached value stale: wallet PUT/DELETE,
+    explicit user refresh, vault lock/unlock when the wallet may have rotated.
+    """
+    _BALANCE_CACHE["value"] = None
+    _BALANCE_CACHE["fetched_at"] = 0.0
 
 
 async def get_usdc_balance(
